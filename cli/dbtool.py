@@ -8,7 +8,7 @@ from colorama import init
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from postgres_client import PostgresClient
-from interaction import interactive_console
+from cli.interaction import interactive_console
 from cli.validateconfig import validate_config
 from console_utils import get_messenger, configure_messenger
 

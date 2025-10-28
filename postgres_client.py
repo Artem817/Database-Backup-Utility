@@ -32,18 +32,6 @@ def analyze_sql(query: str) -> tuple[bool, str]:
     except Exception as e:
         return False, f"SQL analysis failed: {e}"
 
-def print_sql_preview(rows: list, limit: int = 10):
-    messenger = get_messenger()
-    if not rows:
-        messenger.warning("No rows returned")
-        return
-    for i, row in enumerate(rows):
-        if i < limit:
-            print(row)
-        elif i == limit:
-            print(f"... {len(rows) - limit} more rows hidden")
-            break
-
 class PostgresClient(DatabaseClient):
     def __init__(self, host, database, user, password, port=5432, utility_version="1.0.0"):
         self._host = host
