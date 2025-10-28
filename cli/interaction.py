@@ -5,34 +5,10 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
 
+from commands.registry import build_dispatcher 
+
 from postgres_client import PostgresClient
 from console_utils import get_messenger, MessageLevel
-
-def help_message():
-    messenger = get_messenger()
-    messenger.warning("Path should not contain spaces!")
-    messenger.section_header("Database Backup Utility")
-    messenger.success("Available commands:")
-    print()
-    messenger.print_colored("1) Full database backup:", MessageLevel.INFO)
-    print("   full database -path <destination_path> -compress <true|false>")
-    print("   Example: full database -path /backups/mydb -compress true")
-    print()
-    messenger.print_colored("2) Partial table backup:", MessageLevel.INFO)
-    print("   full tables -tablename <t1> -tablename <t2> -path <destination_path> -compress <true|false>")
-    print("   Example: full tables -tablename users -tablename orders -path /backups/tables -compress false")
-    print()
-    messenger.print_colored("3) Execute SQL:", MessageLevel.INFO)
-    print("   SQL <your_sql_query>")
-    print("   Example: SQL SELECT * FROM users WHERE id < 100")
-    print()
-    messenger.print_colored("4) SQL + export to CSV:", MessageLevel.INFO)
-    print("   SQL <your_sql_query> -extract -path <destination_path>")
-    print("   Example: SQL SELECT * FROM users -extract -path /exports")
-    print()
-    messenger.print_colored("5) Exit:", MessageLevel.INFO)
-    print("   exit | quit")
-    print()
 
 def print_sql_preview(rows: list, limit: int = 10):
     messenger = get_messenger()
@@ -81,23 +57,27 @@ class SQLCompleter(Completer):
         'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN',
         'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'DISTINCT',
     ]
-    commands = ['help', 'exit', 'quit', 'full database', 'full tables', 'SQL', '-path', '-tablename', '-extract']
+    commands = ['help', 'exit', 'quit', 'full database', 'full tables', 'differential backup', 'SQL', '-path', '-tablename', '-extract']
 
     def get_completions(self, document, complete_event):
-        word = document.get_word_before_cursor()
-        text = document.text.upper()
-        if text.startswith('SQL'):
+        word_before_cursor = document.get_word_before_cursor()
+        text_before_cursor = document.text_before_cursor
+        if text_before_cursor.upper().startswith('SQL'):
             for keyword in self.keywords:
-                if keyword.startswith(word.upper()):
-                    yield Completion(keyword, start_position=-len(word))
+                if keyword.startswith(word_before_cursor.upper()):
+                    yield Completion(keyword, start_position=-len(word_before_cursor))
         else:
             for cmd in self.commands:
-                if cmd.startswith(word.lower()):
-                    yield Completion(cmd, start_position=-len(word))
+                if cmd.startswith(word_before_cursor.lower()):
+                    yield Completion(cmd, start_position=-len(word_before_cursor))
 
 
 async def interactive_console(db_client: PostgresClient, dbname: str, user: str):
+    
     messenger = get_messenger()
+    dispatcher =  build_dispatcher(db_client, messenger)    
+    
+    
     history_file = Path.home() / ".db_backup_history"
     session = PromptSession(
         history=FileHistory(str(history_file)),
@@ -124,59 +104,19 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
                 continue
 
             command = " ".join(command_tokens).lower()
-            path = parsed_args.path
-            compress = parsed_args.compress
-            tables = parsed_args.tablename or []
-            has_extract = parsed_args.extract
 
             if command in ['exit', 'quit']:
                 messenger.info("Goodbye! 👋")
                 break
-
-            if command == "help":
-                help_message()
-                continue
-
-            if command == "full database":
-                if not path:
-                    messenger.error("Path is required. Use: full database -path <path>")
-                    continue
-                db_client.backup_full(outpath=path, type="csv", compress=compress)
-                continue
-
-            if command == "full tables":
-                if not path:
-                    messenger.error("Path is required. Use: full tables -path <path>")
-                    continue
-                if not tables:
-                    messenger.error("Provide at least one -tablename <name>")
-                    continue
-                db_client.partial_backup(tables=tables, outpath=path, compress=compress)
-                continue
-
-            if command_tokens and command_tokens[0].lower() == "sql":
-                sql_query_text = " ".join(command_tokens[1:])
-                if not sql_query_text:
-                    messenger.error("No SQL query provided. Use: SQL <query>")
-                    continue
-                if not has_extract:
-                    result = db_client.execute_query(sql_query_text)
-                    if result is None:
-                        continue
-                    rows, columns = result
-                    if columns:
-                        print_sql_preview(rows)
-                else:
-                    if not path:
-                        messenger.error("Path required. Use: SQL <query> -extract -path <path>")
-                        continue
-                    db_client.extract_sql_query(sql_query_text, path)
-                continue
-
-            if command:
-                messenger.warning(f"Unknown command: '{command}'")
-                print("Type 'help' for available commands")
-
+            try:
+                dispatcher.dispatch(command, parsed_args)
+            except ValueError as e:
+                messenger.error(str(e))
+            except Exception as e:
+                messenger.error(f"Command execution failed: {e}")
+                import traceback
+                traceback.print_exc()
+            
         except KeyboardInterrupt:
             print()
             continue
