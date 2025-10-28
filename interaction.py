@@ -21,15 +21,19 @@ def help_message():
     print("   full tables -tablename <t1> -tablename <t2> -path <destination_path> -compress <true|false>")
     print("   Example: full tables -tablename users -tablename orders -path /backups/tables -compress false")
     print()
-    print(Fore.MAGENTA + "3) Execute SQL:" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "3) Differential backup:" + Style.RESET_ALL)
+    print("   differential backup")
+    print("   Note: Requires a previous full backup. Will prompt for basis (created_at or updated_at)")
+    print()
+    print(Fore.MAGENTA + "4) Execute SQL:" + Style.RESET_ALL)
     print("   SQL <your_sql_query>")
     print("   Example: SQL SELECT * FROM users WHERE id < 100")
     print()
-    print(Fore.MAGENTA + "4) SQL + export to CSV:" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "5) SQL + export to CSV:" + Style.RESET_ALL)
     print("   SQL <your_sql_query> -extract -path <destination_path>")
     print("   Example: SQL SELECT * FROM users -extract -path /exports")
     print()
-    print(Fore.MAGENTA + "5) Exit:" + Style.RESET_ALL)
+    print(Fore.MAGENTA + "6) Exit:" + Style.RESET_ALL)
     print("   exit | quit")
     print()
 
@@ -78,19 +82,19 @@ class SQLCompleter(Completer):
         'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN',
         'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'DISTINCT',
     ]
-    commands = ['help', 'exit', 'quit', 'full database', 'full tables', 'SQL', '-path', '-tablename', '-extract']
+    commands = ['help', 'exit', 'quit', 'full database', 'full tables', 'differential backup', 'SQL', '-path', '-tablename', '-extract']
 
     def get_completions(self, document, complete_event):
-        word = document.get_word_before_cursor()
-        text = document.text.upper()
-        if text.startswith('SQL'):
+        word_before_cursor = document.get_word_before_cursor()
+        text_before_cursor = document.text_before_cursor
+        if text_before_cursor.upper().startswith('SQL'):
             for keyword in self.keywords:
-                if keyword.startswith(word.upper()):
-                    yield Completion(keyword, start_position=-len(word))
+                if keyword.startswith(word_before_cursor.upper()):
+                    yield Completion(keyword, start_position=-len(word_before_cursor))
         else:
             for cmd in self.commands:
-                if cmd.startswith(word.lower()):
-                    yield Completion(cmd, start_position=-len(word))
+                if cmd.lower().startswith(text_before_cursor.lower()):
+                    yield Completion(cmd, start_position=-len(text_before_cursor))
 
 async def interactive_console(db_client: PostgresClient, dbname: str, user: str):
     history_file = Path.home() / ".db_backup_history"
@@ -136,7 +140,7 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
                 if not path:
                     print(Fore.YELLOW + "[ERROR] Path is required. Use: full database -path <path>" + Style.RESET_ALL)
                     continue
-                db_client.backup_full(outpath=path, type="csv", compress=compress)
+                db_client.backup_full(outpath=path, export_type="csv", compress=compress)
                 continue
 
             if command == "full tables":
@@ -148,7 +152,28 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
                     continue
                 db_client.partial_backup(tables=tables, outpath=path, compress=compress)
                 continue
+        
+            if command == "differential backup":
+                
+                check_last_full = db_client.get_tables()
 
+                if not check_last_full:
+                    print(Fore.YELLOW + f"[ERROR] No full backup found. Differential backup cannot proceed." + Style.RESET_ALL)
+                    continue
+
+                # Ask the user for the differential backup basis
+                basis = await session.prompt_async(
+                    "Perform differential backup based on 'created_at' or 'updated_at'? "
+                )
+                basis = basis.strip().lower()
+
+                if basis not in ["updated_at", "created_at"]:
+                    print(Fore.YELLOW + "[ERROR] Invalid input. Please choose 'created_at' or 'updated_at'." + Style.RESET_ALL)
+                    continue
+
+                db_client.perform_differential_backup(basis=basis, tables=check_last_full)
+                continue
+                
             if command_tokens and command_tokens[0].lower() == "sql":
                 sql_query_text = " ".join(command_tokens[1:])
                 if not sql_query_text:

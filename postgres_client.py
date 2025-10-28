@@ -1,15 +1,18 @@
 import csv
 from pathlib import Path
+from typing import Dict
 from colorama import Fore, Style
 import psycopg2
 import sqlparse
 from psycopg2.extensions import connection
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import subprocess
 import json
 import shutil
 import sys
+import oschmod
+
 
 from factory import DatabaseClient
 from custom_logging import BackupLogger, BackupCatalog
@@ -178,67 +181,111 @@ class PostgresClient(DatabaseClient):
                 );
             """, (schema, table_name))
             return cur.fetchone()[0]
+    
 
-    def _create_backup_structure(self, base_path: Path, backup_id: str) -> dict:
+    def _create_backup_structure(self, base_path: Path, backup_id: str, back_up_time) -> dict:
         backup_root = base_path / backup_id
         data_dir = backup_root / "data"
-        backup_root.mkdir(parents=True, exist_ok=True)
+        backup_diff_dir = backup_root / ".backup_diff"
+        
         data_dir.mkdir(parents=True, exist_ok=True)
+        backup_diff_dir.mkdir(parents=True, exist_ok=True)
+        
+        oschmod.set_mode(backup_diff_dir, "700")
+        
+        manifest_path = backup_diff_dir / "manifest.json"
+        manifest_data = {
+            "base_backup": back_up_time,
+            "diff_chain": [],
+            "last_diff_timestamp": back_up_time
+        }
+        with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+            json.dump(manifest_data, manifest_file, indent=4, ensure_ascii=False)
+        
+        oschmod.set_mode(manifest_path, "600") 
+        
         return {
             "root": backup_root,
             "data": data_dir,
             "schema": backup_root / "schema.sql",
             "metadata": backup_root / "metadata.json",
+            "diff_root": backup_diff_dir,
+            "manifest": manifest_path
         }
 
+    
     def export_table(self, tables, outpath, metadata=None) -> list[dict]:
         saved_files = []
         outpath = Path(outpath) if isinstance(outpath, str) else outpath
+        if not self._prepare_output_directory(outpath):
+            return []
+
+        for schema, table_name in tables:
+            file_path = outpath / f"{table_name}.csv"
+            export_result = self._export_single_table(schema, table_name, file_path, metadata)
+            if export_result:
+                saved_files.append(export_result)
+
+        return saved_files
+
+    def _prepare_output_directory(self, outpath: Path) -> bool:
         try:
             outpath.mkdir(parents=True, exist_ok=True)
+            return True
         except Exception as e:
             print(Fore.RED + f"Failed to create {outpath}: {e}" + Style.RESET_ALL)
             self._logger.error(f"Dir creation failed: {e}")
-            return []
+            return False
 
+    def _export_single_table(self, schema: str, table_name: str, file_path: Path, metadata=None, where: str = None) -> dict | None:
+        full_table_name = f'"{schema}"."{table_name}"'
         try:
+            query = f"SELECT * FROM {full_table_name}"
+            if where:
+                query += f" WHERE {where}"
             with self.connection.cursor() as cur:
-                for schema, table_name in tables:
-                    full_table_name = f'"{schema}"."{table_name}"'
-                    file_path = outpath / f"{table_name}.csv"
-                    try:
-                        cur.execute(f"SELECT * FROM {full_table_name};")
-                        rows = cur.fetchall()
-                        columns = [d[0] for d in cur.description]
-                        with file_path.open("w", newline="", encoding="utf-8") as f:
-                            writer = csv.writer(f)
-                            writer.writerow(columns)
-                            writer.writerows(rows)
-                        file_size = file_path.stat().st_size
-                        saved_files.append({
-                            "table_name": table_name,
-                            "file_path": str(file_path),
-                            "rows_count": len(rows),
-                            "file_size": file_size
-                        })
-                        if metadata:
-                            self._logger.log_table_backup(
-                                metadata=metadata,
-                                table_name=table_name,
-                                rows_count=len(rows),
-                                file_size=file_size,
-                                file_path=str(file_path)
-                            )
-                        print(Fore.GREEN + f"✓ Saved: {file_path.name} ({len(rows)} rows, {file_size / 1024:.2f} KB)" + Style.RESET_ALL)
-                    except Exception as e:
-                        print(Fore.RED + f"✗ Export {table_name} failed: {e}" + Style.RESET_ALL)
-                        self._logger.error(f"Table export failed for {table_name}: {e}")
-                        continue
-            return saved_files
+                cur.execute(query)
+                rows = cur.fetchall()
+                if len(rows) == 0 and where:
+                    selected_columns = self._export_single_table(schema, full_table_name, file_path, metadata)
+                    if selected_columns is not None:
+                        return selected_columns
+                columns = [d[0] for d in cur.description]
+                self._write_table_to_csv(file_path, columns, rows)
+                file_size = file_path.stat().st_size
+                self._log_table_backup(metadata, table_name, len(rows), file_size, str(file_path))
+                print(Fore.GREEN + f"✓ Saved: {file_path.name} ({len(rows)} rows, {file_size / 1024:.2f} KB)" + Style.RESET_ALL)
+                return {
+                    "table_name": table_name,
+                    "file_path": str(file_path),
+                    "rows_count": len(rows),
+                    "file_size": file_size
+                }
+                
         except Exception as e:
-            print(Fore.RED + f"Export failed: {e}" + Style.RESET_ALL)
-            self._logger.error(f"Export op failed: {e}")
-            return []
+            print(Fore.RED + f"✗ Export {table_name} failed: {e}" + Style.RESET_ALL)
+            self._logger.error(f"Table export failed for {table_name}: {e}")
+            return None
+
+    def _write_table_to_csv(self, file_path: Path, columns: list, rows: list):
+        try:
+            with file_path.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                writer.writerows(rows)
+        except Exception as e:
+            print(Fore.RED + f"Failed to write CSV: {e}" + Style.RESET_ALL)
+            self._logger.error(f"CSV write failed: {e}")
+
+    def _log_table_backup(self, metadata: dict, table_name: str, rows_count: int, file_size: int, file_path: str):
+        if metadata:
+            self._logger.log_table_backup(
+                metadata=metadata,
+                table_name=table_name,
+                rows_count=rows_count,
+                file_size=file_size,
+                file_path=file_path
+            )
 
     def database_schema(self, outpath):
         try:
@@ -277,7 +324,7 @@ class PostgresClient(DatabaseClient):
             print(Fore.RED + f"Failed to save metadata: {e}" + Style.RESET_ALL)
             self._logger.error(f"Metadata save failed: {e}")
 
-    def backup_full(self, outpath, type: str = "csv", compress: bool = False):
+    def backup_full(self, outpath, export_type: str = "csv", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         print(Fore.YELLOW + f"Starting full backup → {base_path}" + Style.RESET_ALL)
         if compress:
@@ -292,7 +339,7 @@ class PostgresClient(DatabaseClient):
         )
 
         try:
-            backup_structure = self._create_backup_structure(base_path, metadata["id"])
+            backup_structure = self._create_backup_structure(base_path, metadata["id"], back_up_time=metadata["timestamp_start"])
             print(Fore.CYAN + f"Backup dir: {backup_structure['root']}" + Style.RESET_ALL)
 
             schema_path = self.database_schema(backup_structure["schema"])
@@ -300,6 +347,7 @@ class PostgresClient(DatabaseClient):
                 metadata["schema_file"] = str(backup_structure["schema"])
 
             tables = self.get_tables()
+            
             if not tables:
                 print(Fore.YELLOW + "No tables found" + Style.RESET_ALL)
                 self._logger.warning("No tables for backup")
@@ -323,12 +371,32 @@ class PostgresClient(DatabaseClient):
 
             print(Fore.GREEN + "✓ Full backup completed" + Style.RESET_ALL)
             return True
+        
         except Exception as e:
             print(Fore.RED + f"Backup failed: {e}" + Style.RESET_ALL)
             self._logger.error(f"Backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
 
+    def _column_exists(self, schema: str, table_name: str, column_name: str) -> bool:
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute("SAVEPOINT check_column")
+                try:
+                    cur.execute("""
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = %s AND table_name = %s AND column_name = %s;
+                    """, (schema, table_name, column_name))
+                    result = cur.fetchone() is not None
+                    cur.execute("RELEASE SAVEPOINT check_column")
+                    return result
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT check_column")
+                    return False
+        except Exception as e:
+            self._logger.error(f"Column check failed: {e}")
+            return False
+    
     def partial_backup(self, tables: list, outpath: str, backup_type: str = "partial", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         print(Fore.YELLOW + f"Starting {backup_type} backup → {base_path}" + Style.RESET_ALL)
@@ -344,7 +412,7 @@ class PostgresClient(DatabaseClient):
         )
 
         try:
-            backup_structure = self._create_backup_structure(base_path, metadata["id"])
+            backup_structure = self._create_backup_structure(base_path, metadata["id"],back_up_time =metadata["timestamp_start"])
             print(Fore.CYAN + f"Backup dir: {backup_structure['root']}" + Style.RESET_ALL)
 
             schema_path = self.database_schema(backup_structure["schema"])
@@ -509,9 +577,172 @@ class PostgresClient(DatabaseClient):
                 print(f"{Fore.YELLOW}Size:{Style.RESET_ALL} {size_mb:.2f} MB")
         print(Fore.CYAN + f"\n{'='*80}\n" + Style.RESET_ALL)
 
-    def differential_backup(self):
-        pass  # reserved for future
+    def _get_last_full_backup_info(self, info_type: str) -> str | list[str] | None:
+        print(Fore.CYAN + f"Fetching last full backup info for type: {info_type}" + Style.RESET_ALL)
+        catalog = BackupCatalog()
+        backups = catalog.catalog.get("backups", [])
+        print(Fore.CYAN + f"Total backups found: {len(backups)}" + Style.RESET_ALL)
+        full_backups = [
+            backup for backup in backups
+            if backup.get("database_name") == self._database and backup.get("type") == "full"
+        ]
+        print(Fore.CYAN + f"Full backups for database '{self._database}': {len(full_backups)}" + Style.RESET_ALL)
+        sorted_backups = sorted(full_backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
+        if sorted_backups:
+            last_backup = sorted_backups[0]
+            print(Fore.CYAN + f"Last full backup found: {last_backup}" + Style.RESET_ALL)
+            if info_type == "timestamp":
+                ts = last_backup.get("timestamp_start")
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            elif info_type == "tables":
+                tables = last_backup.get("tables", {})
+                print(Fore.CYAN + f"Tables in last full backup: {list(tables.keys())}" + Style.RESET_ALL)
+                return list(tables.keys())
+            elif info_type == "backup_location":
+                return last_backup.get("backup_location")
+            
+        print(Fore.YELLOW + "No full backups found." + Style.RESET_ALL)
+        return None
 
+    def get_last_full_backup_timestamp(self) -> str | None:
+        return self._get_last_full_backup_info("timestamp")
+
+    def get_table_names_from_last_full_backup(self) -> list[str]:
+        return self._get_last_full_backup_info("tables") or []
+    
+    def get_output_path_from_last_full_backup(self) -> str | None:
+        print("Retrieving last full backup location...")
+        print("self._database:", self._database)
+        
+        return self._get_last_full_backup_info("backup_location")
+    
+    def get_max_updated_at(self, table_name: str, schema: str, column: str):
+        try:
+            query = f'SELECT MAX({column}) FROM "{schema}"."{table_name}"'
+            with self.connection.cursor() as cur:
+                cur.execute(query)
+                result = cur.fetchone()[0]
+                return result.isoformat() if result else "None"
+        except Exception as e:
+            self._logger.error(f"get_max_updated_at failed: {e}")
+            self.rollback()
+            return "Error"
+        
+    def export_diff_table(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
+        print(Fore.YELLOW + f"Exporting differential data since {last_backup_time} using '{basis}'" + Style.RESET_ALL)
+
+        outpath = Path(outpath) if isinstance(outpath, str) else outpath
+        diff_root = outpath / ".backup_diff"
+        diff_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        diff_dir = diff_root / diff_timestamp
+
+        if not self._prepare_output_directory(diff_dir):
+            return {}
+
+        manifest_path = diff_root / "manifest.json"
+        manifest_data = {
+            "base_backup": last_backup_time.isoformat(),
+            "diff_chain": [],
+            "last_diff_timestamp": None
+        }
+
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest_data = json.load(f)
+            except Exception as e:
+                self._logger.warning(f"Failed to read existing manifest, creating new: {e}")
+
+        exported_files = {}
+
+        for schema, table_name in tables:
+            print(Fore.CYAN + f"Last backup (UTC): {last_backup_time}" + Style.RESET_ALL)
+            print(Fore.CYAN + f"Last row in DB: {self.get_max_updated_at(table_name, schema, basis)}" + Style.RESET_ALL)
+            if not self._column_exists(schema, table_name, basis):
+                print(Fore.YELLOW + f"Skipping {table_name}: column '{basis}' does not exist" + Style.RESET_ALL)
+                self._logger.warning(f"Table {table_name} skipped: no '{basis}' column")
+                continue
+
+            file_path = diff_dir / f"{table_name}_diff.csv"
+            try:
+                # Parameterised query
+                query = f'SELECT * FROM "{schema}"."{table_name}" WHERE {basis} > %s'
+                with self.connection.cursor() as cur:
+                    cur.execute(query, (last_backup_time,))
+                    rows = cur.fetchall()
+                    if not rows:
+                        print(Fore.CYAN + f"No new rows in {table_name} since last backup" + Style.RESET_ALL)
+                        continue
+
+                    columns = [d[0] for d in cur.description]
+                    self._write_table_to_csv(file_path, columns, rows)
+                    file_size = file_path.stat().st_size
+
+                    exported_files[table_name] = {
+                        "table_name": table_name,
+                        "file_path": str(file_path),
+                        "rows_count": len(rows),
+                        "file_size": file_size
+                    }
+                    print(Fore.GREEN + f"✓ Diff {table_name}: {len(rows)} rows → {file_path.name}" + Style.RESET_ALL)
+                    self._logger.info(f"Diff export {table_name}: {len(rows)} rows, {file_size/1024:.2f} KB")
+
+            except Exception as e:
+                print(Fore.RED + f"✗ Diff export failed for {table_name}: {e}" + Style.RESET_ALL)
+                self._logger.error(f"Diff export failed for {table_name}: {e}")
+
+        if exported_files:
+            manifest_data["diff_chain"].append(diff_timestamp)
+            manifest_data["last_diff_timestamp"] = diff_timestamp
+            try:
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest_data, f, indent=4, ensure_ascii=False)
+                oschmod.set_mode(manifest_path, "600")
+                print(Fore.CYAN + f"Manifest updated: {manifest_path}" + Style.RESET_ALL)
+            except Exception as e:
+                print(Fore.RED + f"Failed to update manifest: {e}" + Style.RESET_ALL)
+                self._logger.error(f"Manifest update failed: {e}")
+
+        return exported_files
+
+    def perform_differential_backup(self, basis: str, tables: list = None):
+        print(Fore.YELLOW + "Starting differential backup..." + Style.RESET_ALL)
+
+        last_full_timestamp = self.get_last_full_backup_timestamp()
+        backup_location = self.get_output_path_from_last_full_backup()
+
+        if not last_full_timestamp or not backup_location:
+            print(Fore.RED + "No previous full backup found. Cannot perform differential backup." + Style.RESET_ALL)
+            return False
+
+        if not tables:
+            tables = self.get_table_names_from_last_full_backup()
+            if not tables:
+                print(Fore.RED + "No tables found in last full backup." + Style.RESET_ALL)
+                return False
+            tables = [("public", t) for t in tables]
+
+        print(Fore.CYAN + f"Using basis column: {basis}" + Style.RESET_ALL)
+        print(Fore.CYAN + f"Tables: {[t[1] for t in tables]}" + Style.RESET_ALL)
+
+        result = self.export_diff_table(
+            tables=tables,
+            last_backup_time=last_full_timestamp,
+            outpath=backup_location,
+            basis=basis
+        )
+
+        if result:
+            print(Fore.GREEN + "Differential backup completed successfully." + Style.RESET_ALL)
+            return True
+        else:
+            print(Fore.RED + "Differential backup failed or no changes." + Style.RESET_ALL)
+            return False
+        
+        
     def get_last_backup_path(self) -> str | None:
         catalog = BackupCatalog()
         last_backup = catalog.get_last_backup()

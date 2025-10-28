@@ -4,7 +4,7 @@ from logging import getLoggerClass
 import os
 from typing import Any, Dict, Optional
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 OriginalLogger = getLoggerClass()
 
@@ -37,7 +37,7 @@ class BackupLogger:
         self.catalog = BackupCatalog()
 
     def start_backup(self, backup_type: str, database: str, database_version: str, utility_version: str, compress: bool) -> Dict[str, Any]:
-        timestamp_start = datetime.now()
+        timestamp_start = datetime.now(timezone.utc)
         backup_id = generate_backup_id(backup_type, database, timestamp_start)
         parent_backup_id = None
         base_backup_id = None
@@ -49,6 +49,8 @@ class BackupLogger:
             last_full = self.catalog.get_last_full_backup()
             base_backup_id = last_full.get("id") if last_full else None
 
+        print("Current database:", database)
+        
         metadata = {
             "id": backup_id,
             "type": backup_type,
@@ -80,7 +82,7 @@ class BackupLogger:
         return metadata
 
     def finish_backup(self, metadata: Dict[str, Any], success: bool = True) -> None:
-        timestamp_end = datetime.now()
+        timestamp_end = datetime.now(timezone.utc)
         timestamp_start = datetime.fromisoformat(metadata["timestamp_start"])
         duration = (timestamp_end - timestamp_start).total_seconds()
 
@@ -118,7 +120,6 @@ class BackupLogger:
     def error(self, message: str) -> None:
         self.logger.error(message)
 
-
 class BackupCatalog:
     def __init__(self, path: str = "backup_catalog.json"):
         if not isinstance(path, str):
@@ -126,16 +127,19 @@ class BackupCatalog:
         if not path.endswith(".json"):
             raise ValueError("The catalog file must be a JSON file.")
         self.catalog_path = path
+        self.logger = logging.getLogger("BackupCatalog")
         self.catalog = self.load()
 
     def load(self) -> Dict[str, Any]:
         if not os.path.exists(self.catalog_path):
+            self.logger.warning(f"Catalog file not found. Creating a new catalog at {self.catalog_path}.")
             return {"backups": []}
         try:
             with open(self.catalog_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except json.JSONDecodeError:
-            raise ValueError("The catalog file contains invalid JSON.")
+        except (json.JSONDecodeError, ValueError) as e:
+            self.logger.error(f"Failed to load catalog file: {e}. Creating a new catalog at {self.catalog_path}.")
+            return {"backups": []}
 
     def save(self) -> None:
         if not isinstance(self.catalog, dict):
