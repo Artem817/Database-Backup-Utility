@@ -46,7 +46,7 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def backup_full(self, outpath, type: str = "csv", compress: bool = False):
+    def backup_full(self, outpath, export_type: str = "csv", compress: bool = False):
         pass
 
     @abstractmethod
