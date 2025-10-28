@@ -1,6 +1,5 @@
 import csv
 from pathlib import Path
-from colorama import Fore, Style
 import psycopg2
 import sqlparse
 from psycopg2.extensions import connection
@@ -13,6 +12,7 @@ import sys
 
 from factory import DatabaseClient
 from custom_logging import BackupLogger, BackupCatalog
+from console_utils import get_messenger
 
 def analyze_sql(query: str) -> tuple[bool, str]:
     """Analyze SQL for destructive operations."""
@@ -32,8 +32,9 @@ def analyze_sql(query: str) -> tuple[bool, str]:
         return False, f"SQL analysis failed: {e}"
 
 def print_sql_preview(rows: list, limit: int = 10):
+    messenger = get_messenger()
     if not rows:
-        print(Fore.YELLOW + "No rows returned" + Style.RESET_ALL)
+        messenger.warning("No rows returned")
         return
     for i, row in enumerate(rows):
         if i < limit:
@@ -55,6 +56,7 @@ class PostgresClient(DatabaseClient):
         self._logger = BackupLogger(name=f"backup_{database}", log_file=f"backup_{database}.log")
         self._database_version = None
         self.compress: bool = False
+        self._messenger = get_messenger()
 
     @property
     def connection(self):
@@ -82,13 +84,13 @@ class PostgresClient(DatabaseClient):
                 cur.execute("SELECT version();")
                 version = cur.fetchone()[0]
                 self._database_version = version.split(',')[0]
-                print(Fore.GREEN + "✓ PostgreSQL connection successful!" + Style.RESET_ALL)
-                print(Fore.CYAN + f"  Server version: {self._database_version}" + Style.RESET_ALL)
+                self._messenger.success("PostgreSQL connection successful!")
+                self._messenger.info(f"  Server version: {self._database_version}")
                 self._logger.info(f"Connected to database: {self._database} ({self._database_version})")
             return self._connection
         except psycopg2.OperationalError as e:
-            print(Fore.RED + f"Error: Unable to connect. Details: {e}" + Style.RESET_ALL)
-            print(Fore.YELLOW + "Check your .env/CLI settings." + Style.RESET_ALL)
+            self._messenger.error(f"Unable to connect. Details: {e}")
+            self._messenger.warning("Check your .env/CLI settings.")
             self._logger.error(f"Connection failed: {e}")
             return None
 
@@ -97,10 +99,10 @@ class PostgresClient(DatabaseClient):
             if self._connection and not self._connection.closed:
                 self._connection.close()
                 self._connection = None
-                print(Fore.YELLOW + "Disconnected from database." + Style.RESET_ALL)
+                self._messenger.info("Disconnected from database.")
                 self._logger.info("Database connection closed")
         except psycopg2.OperationalError as e:
-            print(Fore.RED + f"Error on disconnect: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Error on disconnect: {e}")
             self._logger.error(f"Disconnect failed: {e}")
             return None
 
@@ -154,7 +156,7 @@ class PostgresClient(DatabaseClient):
                 """, (schema, table_name))
                 return cur.fetchall()
         except Exception as e:
-            print(Fore.RED + f"Failed to get schema for {table_name}: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Failed to get schema for {table_name}: {e}")
             self._logger.error(f"Schema retrieval failed for {table_name}: {e}")
             return []
 
@@ -163,10 +165,10 @@ class PostgresClient(DatabaseClient):
             with self.connection.cursor() as cur:
                 cur.execute("SELECT pg_size_pretty(pg_database_size(%s));", (self._database,))
                 size = cur.fetchone()[0]
-                print(Fore.GREEN + f"Database size: {size}" + Style.RESET_ALL)
+                self._messenger.success(f"Database size: {size}")
                 return size
         except Exception as e:
-            print(Fore.RED + f"Failed to get DB size: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Failed to get DB size: {e}")
             return "Unknown"
 
     def table_exists(self, table_name: str, schema: str = "public") -> bool:
@@ -197,7 +199,7 @@ class PostgresClient(DatabaseClient):
         try:
             outpath.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(Fore.RED + f"Failed to create {outpath}: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Failed to create {outpath}: {e}")
             self._logger.error(f"Dir creation failed: {e}")
             return []
 
@@ -229,14 +231,14 @@ class PostgresClient(DatabaseClient):
                                 file_size=file_size,
                                 file_path=str(file_path)
                             )
-                        print(Fore.GREEN + f"✓ Saved: {file_path.name} ({len(rows)} rows, {file_size / 1024:.2f} KB)" + Style.RESET_ALL)
+                        self._messenger.success(f"Saved: {file_path.name} ({len(rows)} rows, {file_size / 1024:.2f} KB)")
                     except Exception as e:
-                        print(Fore.RED + f"✗ Export {table_name} failed: {e}" + Style.RESET_ALL)
+                        self._messenger.error(f"Export {table_name} failed: {e}")
                         self._logger.error(f"Table export failed for {table_name}: {e}")
                         continue
             return saved_files
         except Exception as e:
-            print(Fore.RED + f"Export failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Export failed: {e}")
             self._logger.error(f"Export op failed: {e}")
             return []
 
@@ -257,14 +259,14 @@ class PostgresClient(DatabaseClient):
             env["PGPASSWORD"] = self._password
             with open(outpath, "w", encoding="utf-8") as f:
                 subprocess.run(command, stdout=f, check=True, env=env)
-            print(Fore.GREEN + f"✓ Schema exported: {outpath}" + Style.RESET_ALL)
+            self._messenger.success(f"Schema exported: {outpath}")
             return str(outpath)
         except subprocess.CalledProcessError as e:
-            print(Fore.RED + f"pg_dump failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"pg_dump failed: {e}")
             self._logger.error(f"pg_dump failed: {e}")
             return None
         except Exception as e:
-            print(Fore.RED + f"Schema export error: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Schema export error: {e}")
             self._logger.error(f"Schema export failed: {e}")
             return None
 
@@ -272,16 +274,16 @@ class PostgresClient(DatabaseClient):
         try:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(metadata, f, indent=4, ensure_ascii=False)
-            print(Fore.GREEN + f"✓ Metadata saved: {filepath}" + Style.RESET_ALL)
+            self._messenger.success(f"Metadata saved: {filepath}")
         except Exception as e:
-            print(Fore.RED + f"Failed to save metadata: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Failed to save metadata: {e}")
             self._logger.error(f"Metadata save failed: {e}")
 
     def backup_full(self, outpath, type: str = "csv", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
-        print(Fore.YELLOW + f"Starting full backup → {base_path}" + Style.RESET_ALL)
+        self._messenger.info(f"Starting full backup → {base_path}")
         if compress:
-            print(Fore.CYAN + "Compression enabled" + Style.RESET_ALL)
+            self._messenger.info("Compression enabled")
 
         metadata = self._logger.start_backup(
             backup_type="full",
@@ -293,7 +295,7 @@ class PostgresClient(DatabaseClient):
 
         try:
             backup_structure = self._create_backup_structure(base_path, metadata["id"])
-            print(Fore.CYAN + f"Backup dir: {backup_structure['root']}" + Style.RESET_ALL)
+            self._messenger.info(f"Backup dir: {backup_structure['root']}")
 
             schema_path = self.database_schema(backup_structure["schema"])
             if schema_path:
@@ -301,15 +303,15 @@ class PostgresClient(DatabaseClient):
 
             tables = self.get_tables()
             if not tables:
-                print(Fore.YELLOW + "No tables found" + Style.RESET_ALL)
+                self._messenger.warning("No tables found")
                 self._logger.warning("No tables for backup")
                 self._logger.finish_backup(metadata, success=False)
                 return False
 
-            print(Fore.CYAN + f"Found {len(tables)} table(s)..." + Style.RESET_ALL)
+            self._messenger.info(f"Found {len(tables)} table(s)...")
             export = self.export_table(tables, backup_structure["data"], metadata=metadata)
             if not export:
-                print(Fore.RED + "✗ Backup failed - no files exported" + Style.RESET_ALL)
+                self._messenger.error("Backup failed - no files exported")
                 self._logger.finish_backup(metadata, success=False)
                 return False
 
@@ -318,22 +320,22 @@ class PostgresClient(DatabaseClient):
             self._save_metadata(metadata, backup_structure["metadata"])
 
             if compress:
-                print(Fore.CYAN + "Compressing..." + Style.RESET_ALL)
+                self._messenger.info("Compressing...")
                 self.compress_backup(backup_structure['root'])
 
-            print(Fore.GREEN + "✓ Full backup completed" + Style.RESET_ALL)
+            self._messenger.success("Full backup completed")
             return True
         except Exception as e:
-            print(Fore.RED + f"Backup failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Backup failed: {e}")
             self._logger.error(f"Backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
 
     def partial_backup(self, tables: list, outpath: str, backup_type: str = "partial", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
-        print(Fore.YELLOW + f"Starting {backup_type} backup → {base_path}" + Style.RESET_ALL)
+        self._messenger.info(f"Starting {backup_type} backup → {base_path}")
         if compress:
-            print(Fore.CYAN + "Compression enabled" + Style.RESET_ALL)
+            self._messenger.info("Compression enabled")
 
         metadata = self._logger.start_backup(
             backup_type=backup_type,
@@ -345,7 +347,7 @@ class PostgresClient(DatabaseClient):
 
         try:
             backup_structure = self._create_backup_structure(base_path, metadata["id"])
-            print(Fore.CYAN + f"Backup dir: {backup_structure['root']}" + Style.RESET_ALL)
+            self._messenger.info(f"Backup dir: {backup_structure['root']}")
 
             schema_path = self.database_schema(backup_structure["schema"])
             if schema_path:
@@ -355,20 +357,20 @@ class PostgresClient(DatabaseClient):
             for table in tables:
                 if self.table_exists(table_name=table):
                     verified_tables.append(("public", table))
-                    print(Fore.GREEN + f"✓ Table '{table}' found" + Style.RESET_ALL)
+                    self._messenger.success(f"Table '{table}' found")
                     self._logger.info(f"Table '{table}' verified")
                 else:
-                    print(Fore.RED + f"✗ Table '{table}' doesn't exist" + Style.RESET_ALL)
+                    self._messenger.error(f"Table '{table}' doesn't exist")
                     self._logger.warning(f"Table '{table}' missing")
 
             if not verified_tables:
-                print(Fore.YELLOW + "No valid tables to export" + Style.RESET_ALL)
+                self._messenger.warning("No valid tables to export")
                 self._logger.finish_backup(metadata, success=False)
                 return False
 
             export = self.export_table(verified_tables, backup_structure["data"], metadata=metadata)
             if not export:
-                print(Fore.RED + "✗ Backup failed - no files exported" + Style.RESET_ALL)
+                self._messenger.error("Backup failed - no files exported")
                 self._logger.finish_backup(metadata, success=False)
                 return False
 
@@ -377,13 +379,13 @@ class PostgresClient(DatabaseClient):
             self._save_metadata(metadata, backup_structure["metadata"])
 
             if compress:
-                print(Fore.CYAN + "Compressing..." + Style.RESET_ALL)
+                self._messenger.info("Compressing...")
                 self.compress_backup(backup_structure['root'])
 
-            print(Fore.GREEN + "✓ Partial backup completed" + Style.RESET_ALL)
+            self._messenger.success("Partial backup completed")
             return True
         except Exception as e:
-            print(Fore.RED + f"Backup failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Backup failed: {e}")
             self._logger.error(f"Partial backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
@@ -391,7 +393,7 @@ class PostgresClient(DatabaseClient):
     def execute_query(self, query: str):
         is_safe, message = analyze_sql(query)
         if not is_safe:
-            print(Fore.YELLOW + message + Style.RESET_ALL)
+            self._messenger.warning(message)
             self._logger.warning(f"Dangerous query detected: {message}")
             if sys.stdin.isatty():
                 confirmation = input("Continue? (Y/n): ")
@@ -414,11 +416,11 @@ class PostgresClient(DatabaseClient):
                 else:
                     self.connection.commit()
                     affected = cur.rowcount
-                    print(Fore.GREEN + f"✓ Query executed. {affected} rows affected." + Style.RESET_ALL)
+                    self._messenger.success(f"Query executed. {affected} rows affected.")
                     self._logger.info(f"Query executed, {affected} rows affected")
                     return ([], [])
         except Exception as e:
-            print(Fore.RED + f"Query failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Query failed: {e}")
             self._logger.error(f"Query failed: {e}")
             self.connection.rollback()
             return None
@@ -426,7 +428,7 @@ class PostgresClient(DatabaseClient):
     def csv_fragmental_backup(self, rows, outpath, query: str = None):
         try:
             if not rows or (isinstance(rows, tuple) and not rows[0]):
-                print(Fore.YELLOW + "No data to export" + Style.RESET_ALL)
+                self._messenger.warning("No data to export")
                 self._logger.warning("No data to export")
                 return False
 
@@ -449,7 +451,7 @@ class PostgresClient(DatabaseClient):
             if isinstance(rows, tuple) and len(rows) == 2:
                 data, columns = rows
             else:
-                print(Fore.RED + "Invalid data format for CSV export" + Style.RESET_ALL)
+                self._messenger.error("Invalid data format for CSV export")
                 self._logger.error("Invalid CSV export data format")
                 return False
 
@@ -459,11 +461,11 @@ class PostgresClient(DatabaseClient):
                 writer.writerows(data)
 
             file_size = file_path.stat().st_size
-            print(Fore.GREEN + f"✓ Saved: {file_path} ({len(data)} rows, {file_size / 1024:.2f} KB)" + Style.RESET_ALL)
+            self._messenger.success(f"Saved: {file_path} ({len(data)} rows, {file_size / 1024:.2f} KB)")
             self._logger.info(f"Query result exported: {file_path} ({len(data)} rows, {file_size} bytes)")
             return str(file_path)
         except Exception as e:
-            print(Fore.RED + f"Failed to save query result: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Failed to save query result: {e}")
             self._logger.error(f"CSV export failed: {e}")
             return False
 
@@ -489,25 +491,31 @@ class PostgresClient(DatabaseClient):
     def print_backup_history(self, limit: int = 10):
         history = self.get_backup_history(limit)
         if not history:
-            print(Fore.YELLOW + "No backup history found" + Style.RESET_ALL)
+            self._messenger.warning("No backup history found")
             return
-        print(Fore.CYAN + f"\n{'='*80}" + Style.RESET_ALL)
-        print(Fore.CYAN + f"Recent Backup History (last {limit})" + Style.RESET_ALL)
-        print(Fore.CYAN + f"{'='*80}" + Style.RESET_ALL)
+        
+        self._messenger.info(f"\n{'='*80}")
+        self._messenger.info(f"Recent Backup History (last {limit})")
+        self._messenger.info(f"{'='*80}")
+        
         for backup in history:
-            status_color = Fore.GREEN if backup.get("status") == "completed" else Fore.RED
-            print(f"\n{Fore.YELLOW}ID:{Style.RESET_ALL} {backup.get('id')}")
-            print(f"{Fore.YELLOW}Type:{Style.RESET_ALL} {backup.get('type')}")
-            print(f"{Fore.YELLOW}Status:{Style.RESET_ALL} {status_color}{backup.get('status')}{Style.RESET_ALL}")
-            print(f"{Fore.YELLOW}Started:{Style.RESET_ALL} {backup.get('timestamp_start')}")
-            print(f"{Fore.YELLOW}Duration:{Style.RESET_ALL} {backup.get('duration_seconds', 0):.2f}s")
+            status_color = "success" if backup.get("status") == "completed" else "error"
+            print(f"\nID: {backup.get('id')}")
+            print(f"Type: {backup.get('type')}")
+            print(f"Status: ", end="")
+            if status_color == "success":
+                self._messenger.success(backup.get('status'))
+            else:
+                self._messenger.error(backup.get('status'))
+            print(f"Started: {backup.get('timestamp_start')}")
+            print(f"Duration: {backup.get('duration_seconds', 0):.2f}s")
             stats = backup.get('statistics', {})
             if stats:
                 size_mb = stats.get('total_size_bytes', 0) / 1024 / 1024
-                print(f"{Fore.YELLOW}Tables:{Style.RESET_ALL} {stats.get('total_tables', 0)}")
-                print(f"{Fore.YELLOW}Rows:{Style.RESET_ALL} {stats.get('total_rows_processed', 0)}")
-                print(f"{Fore.YELLOW}Size:{Style.RESET_ALL} {size_mb:.2f} MB")
-        print(Fore.CYAN + f"\n{'='*80}\n" + Style.RESET_ALL)
+                print(f"Tables: {stats.get('total_tables', 0)}")
+                print(f"Rows: {stats.get('total_rows_processed', 0)}")
+                print(f"Size: {size_mb:.2f} MB")
+        self._messenger.info(f"\n{'='*80}\n")
 
     def differential_backup(self):
         pass  # reserved for future
@@ -523,18 +531,18 @@ class PostgresClient(DatabaseClient):
         """Compress a backup directory to zip."""
         path = Path(path) if isinstance(path, str) else path
         if not path.exists() or not path.is_dir():
-            print(Fore.RED + f"Invalid path: {path}" + Style.RESET_ALL)
+            self._messenger.error(f"Invalid path: {path}")
             return False
         try:
             zip_path = shutil.make_archive(str(path), 'zip', str(path))
             if zip_path:
-                print(Fore.CYAN + "\n" + "="*60 + Style.RESET_ALL)
-                print(Fore.GREEN + "Compressed backup location:" + Style.RESET_ALL)
-                print(Fore.YELLOW + zip_path + Style.RESET_ALL)
-                print(Fore.CYAN + "="*60 + "\n" + Style.RESET_ALL)
+                self._messenger.info("\n" + "="*60)
+                self._messenger.success("Compressed backup location:")
+                self._messenger.info(zip_path)
+                self._messenger.info("="*60 + "\n")
                 return True
-            print(Fore.YELLOW + "Compression produced no file" + Style.RESET_ALL)
+            self._messenger.warning("Compression produced no file")
             return False
         except Exception as e:
-            print(Fore.RED + f"Compression failed: {e}" + Style.RESET_ALL)
+            self._messenger.error(f"Compression failed: {e}")
             return False

@@ -1,41 +1,43 @@
 import argparse
 from pathlib import Path
-from colorama import Fore, Style
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
 
 from postgres_client import PostgresClient
+from console_utils import get_messenger, MessageLevel
 
 def help_message():
-    print(Fore.YELLOW + "⚠ Path should not contain spaces!" + Style.RESET_ALL)
-    print(Fore.CYAN + Style.BRIGHT + "\n=== Database Backup Utility ===" + Style.RESET_ALL)
-    print(Fore.GREEN + "Available commands:" + Style.RESET_ALL)
+    messenger = get_messenger()
+    messenger.warning("Path should not contain spaces!")
+    messenger.section_header("Database Backup Utility")
+    messenger.success("Available commands:")
     print()
-    print(Fore.MAGENTA + "1) Full database backup:" + Style.RESET_ALL)
+    messenger.print_colored("1) Full database backup:", MessageLevel.INFO)
     print("   full database -path <destination_path> -compress <true|false>")
     print("   Example: full database -path /backups/mydb -compress true")
     print()
-    print(Fore.MAGENTA + "2) Partial table backup:" + Style.RESET_ALL)
+    messenger.print_colored("2) Partial table backup:", MessageLevel.INFO)
     print("   full tables -tablename <t1> -tablename <t2> -path <destination_path> -compress <true|false>")
     print("   Example: full tables -tablename users -tablename orders -path /backups/tables -compress false")
     print()
-    print(Fore.MAGENTA + "3) Execute SQL:" + Style.RESET_ALL)
+    messenger.print_colored("3) Execute SQL:", MessageLevel.INFO)
     print("   SQL <your_sql_query>")
     print("   Example: SQL SELECT * FROM users WHERE id < 100")
     print()
-    print(Fore.MAGENTA + "4) SQL + export to CSV:" + Style.RESET_ALL)
+    messenger.print_colored("4) SQL + export to CSV:", MessageLevel.INFO)
     print("   SQL <your_sql_query> -extract -path <destination_path>")
     print("   Example: SQL SELECT * FROM users -extract -path /exports")
     print()
-    print(Fore.MAGENTA + "5) Exit:" + Style.RESET_ALL)
+    messenger.print_colored("5) Exit:", MessageLevel.INFO)
     print("   exit | quit")
     print()
 
 def print_sql_preview(rows: list, limit: int = 10):
+    messenger = get_messenger()
     if not rows:
-        print(Fore.YELLOW + "No rows returned" + Style.RESET_ALL)
+        messenger.warning("No rows returned")
         return
     for i, row in enumerate(rows):
         if i < limit:
@@ -55,6 +57,7 @@ def str_to_bool_caster(v):
     raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def parse_query_args(query: str):
+    messenger = get_messenger()
     parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
     parser.add_argument("-path", type=Path, default=None, help="Destination path")
     parser.add_argument("-compress", type=str_to_bool_caster, default=False, help="Compression flag")
@@ -64,10 +67,10 @@ def parse_query_args(query: str):
         known_args, command_tokens = parser.parse_known_args(query.split())
         return known_args, command_tokens
     except (SystemExit, argparse.ArgumentError) as e:
-        print(Fore.YELLOW + f"[PARSING ERROR] {e}" + Style.RESET_ALL)
+        messenger.warning(f"[PARSING ERROR] {e}")
         return None, None
     except Exception as e:
-        print(f"Unexpected parsing error: {e}")
+        messenger.error(f"Unexpected parsing error: {e}")
         return None, None
 
 class SQLCompleter(Completer):
@@ -92,7 +95,9 @@ class SQLCompleter(Completer):
                 if cmd.startswith(word.lower()):
                     yield Completion(cmd, start_position=-len(word))
 
+
 async def interactive_console(db_client: PostgresClient, dbname: str, user: str):
+    messenger = get_messenger()
     history_file = Path.home() / ".db_backup_history"
     session = PromptSession(
         history=FileHistory(str(history_file)),
@@ -103,8 +108,8 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
     )
 
     print(f"{'='*80}")
-    print(Fore.CYAN + "Database Backup Utility" + Style.RESET_ALL)
-    print(f"Connected to: {Fore.GREEN}{dbname}{Style.RESET_ALL} as {Fore.GREEN}{user}{Style.RESET_ALL}")
+    messenger.info("Database Backup Utility")
+    print(f"Connected to: {messenger._get_colored_message(dbname, MessageLevel.SUCCESS)} as {messenger._get_colored_message(user, MessageLevel.SUCCESS)}")
     print("Type 'help' for commands or 'exit' to quit\n")
 
     while True:
@@ -125,7 +130,7 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
             has_extract = parsed_args.extract
 
             if command in ['exit', 'quit']:
-                print(Fore.CYAN + "Goodbye! 👋" + Style.RESET_ALL)
+                messenger.info("Goodbye! 👋")
                 break
 
             if command == "help":
@@ -134,17 +139,17 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
 
             if command == "full database":
                 if not path:
-                    print(Fore.YELLOW + "[ERROR] Path is required. Use: full database -path <path>" + Style.RESET_ALL)
+                    messenger.error("Path is required. Use: full database -path <path>")
                     continue
                 db_client.backup_full(outpath=path, type="csv", compress=compress)
                 continue
 
             if command == "full tables":
                 if not path:
-                    print(Fore.YELLOW + "[ERROR] Path is required. Use: full tables -path <path>" + Style.RESET_ALL)
+                    messenger.error("Path is required. Use: full tables -path <path>")
                     continue
                 if not tables:
-                    print(Fore.YELLOW + "[ERROR] Provide at least one -tablename <name>" + Style.RESET_ALL)
+                    messenger.error("Provide at least one -tablename <name>")
                     continue
                 db_client.partial_backup(tables=tables, outpath=path, compress=compress)
                 continue
@@ -152,7 +157,7 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
             if command_tokens and command_tokens[0].lower() == "sql":
                 sql_query_text = " ".join(command_tokens[1:])
                 if not sql_query_text:
-                    print(Fore.YELLOW + "[ERROR] No SQL query provided. Use: SQL <query>" + Style.RESET_ALL)
+                    messenger.error("No SQL query provided. Use: SQL <query>")
                     continue
                 if not has_extract:
                     result = db_client.execute_query(sql_query_text)
@@ -163,22 +168,22 @@ async def interactive_console(db_client: PostgresClient, dbname: str, user: str)
                         print_sql_preview(rows)
                 else:
                     if not path:
-                        print(Fore.YELLOW + "[ERROR] Path required. Use: SQL <query> -extract -path <path>" + Style.RESET_ALL)
+                        messenger.error("Path required. Use: SQL <query> -extract -path <path>")
                         continue
                     db_client.extract_sql_query(sql_query_text, path)
                 continue
 
             if command:
-                print(Fore.YELLOW + f"Unknown command: '{command}'" + Style.RESET_ALL)
+                messenger.warning(f"Unknown command: '{command}'")
                 print("Type 'help' for available commands")
 
         except KeyboardInterrupt:
             print()
             continue
         except EOFError:
-            print(Fore.CYAN + "\nGoodbye! 👋" + Style.RESET_ALL)
+            messenger.info("\nGoodbye! 👋")
             break
         except Exception as e:
-            print(Fore.RED + f"Unexpected error: {e}" + Style.RESET_ALL)
+            messenger.error(f"Unexpected error: {e}")
             import traceback
             traceback.print_exc()

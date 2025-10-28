@@ -44,7 +44,7 @@ DB_PASSWORD=changeme
 ### Run via .env
 
 ```bash
-python dbtool.py backup --db postgres --database mydb --storage local --config file
+python3 cli/dbtool.py backup --db postgres --database mydb --storage local --config file
 ```
 
 *`mydb` is the database you want to back up.*
