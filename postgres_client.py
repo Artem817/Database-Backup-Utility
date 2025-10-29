@@ -1,39 +1,24 @@
 import csv
 from pathlib import Path
 import psycopg2
-import sqlparse
 from psycopg2.extensions import connection
 from datetime import datetime, timezone
-import os
-import subprocess
 import json
-import shutil
-import sys
 import oschmod
 
 from factory import DatabaseClient
 from custom_logging import BackupLogger, BackupCatalog
 from console_utils import get_messenger
+from services.backup.core import DifferentialBackupService, CompressionService
+from services.backup.exporters import SchemaExporter, TableExporter
+from services.backup.metadata import BackupMetadataReader, BackupHistoryService
+from services.execution.executor import QueryExecutor
+from services.execution.exporter import QueryResultExporter
+from services.interfaces import IConnectionProvider
 
-def analyze_sql(query: str) -> tuple[bool, str]:
-    """Analyze SQL for destructive operations."""
-    if not query or not query.strip():
-        return True, "Empty query."
-    dangerous = {"DROP", "DELETE", "TRUNCATE", "ALTER"}
-    try:
-        parsed = sqlparse.parse(query)
-        if not parsed:
-            return True, "Empty query."
-        tokens = [t.value.upper() for t in parsed[0].tokens if not t.is_whitespace]
-        found = [w for w in dangerous if w in tokens]
-        if found:
-            return False, f"The query contains dangerous keywords: {', '.join(found)}"
-        return True, "Looks safe."
-    except Exception as e:
-        return False, f"SQL analysis failed: {e}"
 
-class PostgresClient(DatabaseClient):
-    def __init__(self, host, database, user, password, port=5432, utility_version="1.0.0"):
+class PostgresClient(DatabaseClient, IConnectionProvider):
+    def __init__(self, host, database, user, password, logger: BackupLogger = None, messenger=None, port=5432, utility_version="1.0.0"):
         self._host = host
         self._database = database
         self._user = user
@@ -41,11 +26,10 @@ class PostgresClient(DatabaseClient):
         self._port = port
         self._connection: connection = None
         self._utility_version = utility_version
-
-        self._logger = BackupLogger(name=f"backup_{database}", log_file=f"backup_{database}.log")
         self._database_version = None
         self.compress: bool = False
-        self._messenger = get_messenger()
+        self._logger = logger if logger is not None else BackupLogger(name=f"backup_{database}", log_file=f"backup_{database}.log")
+        self._messenger = messenger if messenger is not None else get_messenger()
 
     @property
     def connection(self):
@@ -57,7 +41,13 @@ class PostgresClient(DatabaseClient):
 
     @property
     def connection_params(self):
-        return {"host": self._host, "user": self._user, "database": self._database, "port": self._port}
+        return {"host": self._host, "user": self._user, "database": self._database, "port": self._port, "password": self._password}
+
+    def get_connection(self):
+        return self._connection
+    
+    def get_connection_params(self):
+        return self.connection_params
 
     @property
     def is_connected(self):
@@ -124,52 +114,116 @@ class PostgresClient(DatabaseClient):
         except Exception:
             return False
 
+    # Legacy methods that still need to be present for compatibility
     def get_tables(self):
         """Return list of (schema, table_name) for user tables."""
-        with self.connection.cursor() as cur:
-            cur.execute("""
-            SELECT table_schema, table_name
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
-              AND table_schema NOT IN ('pg_catalog', 'information_schema');
-            """)
-            return cur.fetchall()
-
-    def get_table_schema(self, table_name: str, schema: str = "public"):
-        try:
-            with self.connection.cursor() as cur:
-                cur.execute("""
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = %s AND table_name = %s;
-                """, (schema, table_name))
-                return cur.fetchall()
-        except Exception as e:
-            self._messenger.error(f"Failed to get schema for {table_name}: {e}")
-            self._logger.error(f"Schema retrieval failed for {table_name}: {e}")
-            return []
-
-    def get_database_size(self) -> str:
-        try:
-            with self.connection.cursor() as cur:
-                cur.execute("SELECT pg_size_pretty(pg_database_size(%s));", (self._database,))
-                size = cur.fetchone()[0]
-                self._messenger.success(f"Database size: {size}")
-                return size
-        except Exception as e:
-            self._messenger.error(f"Failed to get DB size: {e}")
-            return "Unknown"
-
-    def table_exists(self, table_name: str, schema: str = "public") -> bool:
-        with self.connection.cursor() as cur:
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                );
-            """, (schema, table_name))
-            return cur.fetchone()[0]
+        table_exporter = TableExporter(self, self._logger, self._messenger)
+        return table_exporter.get_tables()
     
+    def table_exists(self, table_name: str, schema: str = "public") -> bool:
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        return schema_exporter.table_exists(table_name, schema)
+    
+    def get_backup_history(self, limit: int = 10) -> list:
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        return metadata_reader.get_backup_history(limit)
+    
+    def get_last_full_backup_timestamp(self) -> str | None:
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        return metadata_reader.get_last_full_backup_timestamp()
+    
+    def get_table_names_from_last_full_backup(self) -> list[str]:
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        return metadata_reader.get_table_names_from_last_full_backup()
+    
+    def get_output_path_from_last_full_backup(self) -> str | None:
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        return metadata_reader.get_output_path_from_last_full_backup()
+    
+    def database_schema(self, output_path: Path) -> str | None:
+        """Export database schema using pg_dump."""
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        return schema_exporter.export_schema(output_path)
+    
+    def _export_single_table(self, schema: str, table_name: str, file_path: Path, metadata=None) -> dict | None:
+        """Export a single table to CSV."""
+        try:
+            full_table_name = f'"{schema}"."{table_name}"'
+            
+            with self.connection.cursor() as cur:
+                cur.execute(f"SELECT * FROM {full_table_name}")
+                rows = cur.fetchall()
+                columns = [d[0] for d in cur.description]
+                
+                self._write_table_to_csv(file_path, columns, rows)
+                file_size = file_path.stat().st_size
+                
+                self._messenger.success(
+                    f"Exported {table_name}: {len(rows)} rows, {file_size/1024:.2f} KB"
+                )
+                
+                if metadata:
+                    self._log_table_backup(metadata, table_name, len(rows), file_size, str(file_path))
+                
+                return {
+                    "table_name": table_name,
+                    "file_path": str(file_path),
+                    "rows_count": len(rows),
+                    "file_size": file_size
+                }
+                
+        except Exception as e:
+            self._messenger.error(f"Export {table_name} failed: {e}")
+            self._logger.error(f"Table export failed for {table_name}: {e}")
+            return None
+
+    # Methods that use new service classes
+    def print_backup_history(self, limit: int = 10):
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        history_service = BackupHistoryService(metadata_reader, self._messenger)
+        history_service.print_backup_history(limit)
+    
+    def csv_fragmental_backup(self, rows, outpath, query: str = None):
+        query_result_exporter = QueryResultExporter(self._logger, self._messenger, self._database)
+        return query_result_exporter.export_csv(rows, outpath, query)
+    
+    def extract_sql_query(self, query: str, outpath):
+        query_executor = QueryExecutor(self, self._logger, self._messenger)
+        query_result_exporter = QueryResultExporter(self._logger, self._messenger, self._database)
+        return query_executor.extract_sql_query(query, outpath, query_result_exporter)
+    
+    def compress_backup(self, path):
+        compression_service = CompressionService(self._logger, self._messenger)
+        return compression_service.compress_backup(path)
+    
+    def perform_differential_backup(self, basis: str, tables: list = None):
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        table_exporter = TableExporter(self, self._logger, self._messenger)
+        diff_service = DifferentialBackupService(self, self._logger, self._messenger, schema_exporter, table_exporter)
+        return diff_service.perform_differential_backup(basis, metadata_reader, tables)
+    
+    def export_diff_table(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        table_exporter = TableExporter(self, self._logger, self._messenger)
+        diff_service = DifferentialBackupService(self, self._logger, self._messenger, schema_exporter, table_exporter)
+        return diff_service.export_diff_table(tables, last_backup_time, outpath, basis)
+    
+    def get_max_updated_at(self, table_name: str, schema: str, column: str):
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        table_exporter = TableExporter(self, self._logger, self._messenger)
+        diff_service = DifferentialBackupService(self, self._logger, self._messenger, schema_exporter, table_exporter)
+        return diff_service.get_max_updated_at(table_name, schema, column)
+    
+    def get_last_backup_path(self) -> str | None:
+        catalog = BackupCatalog()
+        return catalog.get_last_backup().get("backup_location") if catalog.get_last_backup() else None
 
     def _create_backup_structure(self, base_path: Path, backup_id: str, back_up_time=None) -> dict:
         backup_root = base_path / backup_id
@@ -201,7 +255,6 @@ class PostgresClient(DatabaseClient):
             "manifest": manifest_path
         }
 
-    
     def export_table(self, tables, outpath, metadata=None) -> list[dict]:
         saved_files = []
         outpath = Path(outpath) if isinstance(outpath, str) else outpath
@@ -215,7 +268,7 @@ class PostgresClient(DatabaseClient):
                 saved_files.append(export_result)
 
         return saved_files
-
+    
     def _prepare_output_directory(self, outpath: Path) -> bool:
         try:
             outpath.mkdir(parents=True, exist_ok=True)
@@ -224,35 +277,6 @@ class PostgresClient(DatabaseClient):
             self._messenger.error(f"Failed to create {outpath}: {e}")
             self._logger.error(f"Dir creation failed: {e}")
             return False
-
-    def _export_single_table(self, schema: str, table_name: str, file_path: Path, metadata=None, where: str = None) -> dict | None:
-        full_table_name = f'"{schema}"."{table_name}"'
-        try:
-            query = f"SELECT * FROM {full_table_name}"
-            if where:
-                query += f" WHERE {where}"
-            with self.connection.cursor() as cur:
-                cur.execute(query)
-                rows = cur.fetchall()
-                if len(rows) == 0 and where:
-                    # If no rows with WHERE condition, try without
-                    return self._export_single_table(schema, table_name, file_path, metadata)
-                columns = [d[0] for d in cur.description]
-                self._write_table_to_csv(file_path, columns, rows)
-                file_size = file_path.stat().st_size
-                self._log_table_backup(metadata, table_name, len(rows), file_size, str(file_path))
-                self._messenger.success(f"Saved: {file_path.name} ({len(rows)} rows, {file_size / 1024:.2f} KB)")
-                return {
-                    "table_name": table_name,
-                    "file_path": str(file_path),
-                    "rows_count": len(rows),
-                    "file_size": file_size
-                }
-                
-        except Exception as e:
-            self._messenger.error(f"Export {table_name} failed: {e}")
-            self._logger.error(f"Table export failed for {table_name}: {e}")
-            return None
 
     def _write_table_to_csv(self, file_path: Path, columns: list, rows: list):
         try:
@@ -274,34 +298,6 @@ class PostgresClient(DatabaseClient):
                 file_path=file_path
             )
 
-    def database_schema(self, outpath):
-        try:
-            outpath = Path(outpath) if isinstance(outpath, str) else outpath
-            if not outpath.exists():
-                outpath.parent.mkdir(parents=True, exist_ok=True)
-            command = [
-                "pg_dump",
-                "--host", self._host,
-                "--port", str(self._port),
-                "--username", self._user,
-                "--dbname", self._database,
-                "--schema-only",
-            ]
-            env = os.environ.copy()
-            env["PGPASSWORD"] = self._password
-            with open(outpath, "w", encoding="utf-8") as f:
-                subprocess.run(command, stdout=f, check=True, env=env)
-            self._messenger.success(f"Schema exported: {outpath}")
-            return str(outpath)
-        except subprocess.CalledProcessError as e:
-            self._messenger.error(f"pg_dump failed: {e}")
-            self._logger.error(f"pg_dump failed: {e}")
-            return None
-        except Exception as e:
-            self._messenger.error(f"Schema export error: {e}")
-            self._logger.error(f"Schema export failed: {e}")
-            return None
-
     def _save_metadata(self, metadata: dict, filepath: Path):
         try:
             with open(filepath, "w", encoding="utf-8") as f:
@@ -310,7 +306,7 @@ class PostgresClient(DatabaseClient):
         except Exception as e:
             self._messenger.error(f"Failed to save metadata: {e}")
             self._logger.error(f"Metadata save failed: {e}")
-
+            
     def backup_full(self, outpath, export_type: str = "csv", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full backup → {base_path}")
@@ -330,7 +326,7 @@ class PostgresClient(DatabaseClient):
             self._messenger.info(f"Backup dir: {backup_structure['root']}")
 
             schema_path = self.database_schema(backup_structure["schema"])
-            if schema_path:
+            if (schema_path):
                 metadata["schema_file"] = str(backup_structure["schema"])
 
             tables = self.get_tables()
@@ -365,7 +361,7 @@ class PostgresClient(DatabaseClient):
             self._logger.finish_backup(metadata, success=False)
             return False
 
-    def _column_exists(self, schema: str, table_name: str, column_name: str) -> bool:
+    def _column_exists(self, schema: str, table_name: str, column: str) -> bool:
         try:
             with self.connection.cursor() as cur:
                 cur.execute("SAVEPOINT check_column")
@@ -373,7 +369,7 @@ class PostgresClient(DatabaseClient):
                     cur.execute("""
                         SELECT 1 FROM information_schema.columns
                         WHERE table_schema = %s AND table_name = %s AND column_name = %s;
-                    """, (schema, table_name, column_name))
+                    """, (schema, table_name, column))
                     result = cur.fetchone() is not None
                     cur.execute("RELEASE SAVEPOINT check_column")
                     return result
@@ -383,7 +379,7 @@ class PostgresClient(DatabaseClient):
         except Exception as e:
             self._logger.error(f"Column check failed: {e}")
             return False
-    
+
     def partial_backup(self, tables: list, outpath: str, backup_type: str = "partial", compress: bool = False):
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting {backup_type} backup → {base_path}")
@@ -444,321 +440,15 @@ class PostgresClient(DatabaseClient):
             return False
 
     def execute_query(self, query: str):
-        is_safe, message = analyze_sql(query)
-        if not is_safe:
-            self._messenger.warning(message)
-            self._logger.warning(f"Dangerous query detected: {message}")
-            if sys.stdin.isatty():
-                confirmation = input("Continue? (Y/n): ")
-                if confirmation.upper() != "Y":
-                    self._logger.info("Query execution cancelled by user")
-                    return None
-            else:
-                self._logger.warning("Non-interactive mode: dangerous query skipped.")
-                return None
+        query_executor = QueryExecutor(self, self._logger, self._messenger)
+        return query_executor.execute_query(query)
 
-        try:
-            with self.connection.cursor() as cur:
-                self._logger.info(f"Executing query: {query[:100]}...")
-                cur.execute(query)
-                if cur.description:
-                    rows = cur.fetchall()
-                    columns = [d[0] for d in cur.description]
-                    self._logger.info(f"Query returned {len(rows)} rows")
-                    return (rows, columns)
-                else:
-                    self.connection.commit()
-                    affected = cur.rowcount
-                    self._messenger.success(f"Query executed. {affected} rows affected.")
-                    self._logger.info(f"Query executed, {affected} rows affected")
-                    return ([], [])
-        except Exception as e:
-            self._messenger.error(f"Query failed: {e}")
-            self._logger.error(f"Query failed: {e}")
-            self.connection.rollback()
-            return None
+    def get_database_size(self) -> str:
+        """Delegate to SchemaExporter to get formatted database size."""
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        return schema_exporter.get_database_size()
 
-    def csv_fragmental_backup(self, rows, outpath, query: str = None):
-        try:
-            if not rows or (isinstance(rows, tuple) and not rows[0]):
-                self._messenger.warning("No data to export")
-                self._logger.warning("No data to export")
-                return False
-
-            outpath = Path(outpath) if isinstance(outpath, str) else outpath
-            outpath.mkdir(parents=True, exist_ok=True)
-
-            if query:
-                query_upper = query.upper().strip()
-                if "FROM" in query_upper:
-                    table_part = query_upper.split("FROM")[1].split()[0]
-                    table_name = table_part.strip('"').strip("'").replace(".", "_")
-                    filename = f"query_{table_name}_{self._database}.csv"
-                else:
-                    filename = f"query_result_{self._database}.csv"
-            else:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"query_{timestamp}_{self._database}.csv"
-
-            file_path = outpath / filename
-            if isinstance(rows, tuple) and len(rows) == 2:
-                data, columns = rows
-            else:
-                self._messenger.error("Invalid data format for CSV export")
-                self._logger.error("Invalid CSV export data format")
-                return False
-
-            with file_path.open("w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(columns)
-                writer.writerows(data)
-
-            file_size = file_path.stat().st_size
-            self._messenger.success(f"Saved: {file_path} ({len(data)} rows, {file_size / 1024:.2f} KB)")
-            self._logger.info(f"Query result exported: {file_path} ({len(data)} rows, {file_size} bytes)")
-            return str(file_path)
-        except Exception as e:
-            self._messenger.error(f"Failed to save query result: {e}")
-            self._logger.error(f"CSV export failed: {e}")
-            return False
-
-    def extract_sql_query(self, query: str, outpath):
-        self._logger.info(f"Starting query extraction to: {outpath}")
-        execute_result = self.execute_query(query)
-        if execute_result is None:
-            self._logger.warning("Query extraction cancelled or failed")
-            return False
-        result = self.csv_fragmental_backup(execute_result, outpath, query)
-        if result:
-            self._logger.info(f"Query extraction completed: {result}")
-        else:
-            self._logger.error("Query extraction failed")
-        return result
-
-    def get_backup_history(self, limit: int = 10) -> list:
-        catalog = BackupCatalog()
-        backups = catalog.catalog.get("backups", [])
-        sorted_backups = sorted(backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
-        return sorted_backups[:limit]
-
-    def print_backup_history(self, limit: int = 10):
-        history = self.get_backup_history(limit)
-        if not history:
-            self._messenger.warning("No backup history found")
-            return
-        
-        self._messenger.info(f"\n{'='*80}")
-        self._messenger.info(f"Recent Backup History (last {limit})")
-        self._messenger.info(f"{'='*80}")
-        
-        for backup in history:
-            status_color = "success" if backup.get("status") == "completed" else "error"
-            print(f"\nID: {backup.get('id')}")
-            print(f"Type: {backup.get('type')}")
-            print(f"Status: ", end="")
-            if status_color == "success":
-                self._messenger.success(backup.get('status'))
-            else:
-                self._messenger.error(backup.get('status'))
-            print(f"Started: {backup.get('timestamp_start')}")
-            print(f"Duration: {backup.get('duration_seconds', 0):.2f}s")
-            stats = backup.get('statistics', {})
-            if stats:
-                size_mb = stats.get('total_size_bytes', 0) / 1024 / 1024
-                print(f"Tables: {stats.get('total_tables', 0)}")
-                print(f"Rows: {stats.get('total_rows_processed', 0)}")
-                print(f"Size: {size_mb:.2f} MB")
-        self._messenger.info(f"\n{'='*80}\n")
-
-    def _get_last_full_backup_info(self, info_type: str) -> str | list[str] | None:
-        self._messenger.info(f"Fetching last full backup info for type: {info_type}")
-        catalog = BackupCatalog()
-        backups = catalog.catalog.get("backups", [])
-        self._messenger.info(f"Total backups found: {len(backups)}")
-        full_backups = [
-            backup for backup in backups
-            if backup.get("database_name") == self._database and backup.get("type") == "full"
-        ]
-        self._messenger.info(f"Full backups for database '{self._database}': {len(full_backups)}")
-        sorted_backups = sorted(full_backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
-        if sorted_backups:
-            last_backup = sorted_backups[0]
-            self._messenger.info(f"Last full backup found: {last_backup['id']}")
-            if info_type == "timestamp":
-                ts = last_backup.get("timestamp_start")
-                dt = datetime.fromisoformat(ts)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
-            elif info_type == "tables":
-                tables = last_backup.get("tables", {})
-                self._messenger.info(f"Tables in last full backup: {list(tables.keys())}")
-                return list(tables.keys())
-            elif info_type == "backup_location":
-                return last_backup.get("backup_location")
-            
-        self._messenger.warning("No full backups found.")
-        return None
-
-    def get_last_full_backup_timestamp(self) -> str | None:
-        return self._get_last_full_backup_info("timestamp")
-
-    def get_table_names_from_last_full_backup(self) -> list[str]:
-        return self._get_last_full_backup_info("tables") or []
-    
-    def get_output_path_from_last_full_backup(self) -> str | None:
-        self._messenger.info("Retrieving last full backup location...")
-        self._messenger.info(f"self._database: {self._database}")
-        
-        return self._get_last_full_backup_info("backup_location")
-    
-    def get_max_updated_at(self, table_name: str, schema: str, column: str):
-        try:
-            query = f'SELECT MAX({column}) FROM "{schema}"."{table_name}"'
-            with self.connection.cursor() as cur:
-                cur.execute(query)
-                result = cur.fetchone()[0]
-                return result.isoformat() if result else "None"
-        except Exception as e:
-            self._logger.error(f"get_max_updated_at failed: {e}")
-            self.rollback()
-            return "Error"
-        
-    def export_diff_table(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
-        self._messenger.warning(f"Exporting differential data since {last_backup_time} using '{basis}'")
-
-        outpath = Path(outpath) if isinstance(outpath, str) else outpath
-        diff_root = outpath / ".backup_diff"
-        diff_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        diff_dir = diff_root / diff_timestamp
-
-        if not self._prepare_output_directory(diff_dir):
-            return {}
-
-        manifest_path = diff_root / "manifest.json"
-        manifest_data = {
-            "base_backup": last_backup_time.isoformat(),
-            "diff_chain": [],
-            "last_diff_timestamp": None
-        }
-
-        if manifest_path.exists():
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest_data = json.load(f)
-            except Exception as e:
-                self._logger.warning(f"Failed to read existing manifest, creating new: {e}")
-
-        exported_files = {}
-
-        for schema, table_name in tables:
-            self._messenger.info(f"Last backup (UTC): {last_backup_time}")
-            self._messenger.info(f"Last row in DB: {self.get_max_updated_at(table_name, schema, basis)}")
-            if not self._column_exists(schema, table_name, basis):
-                self._messenger.warning(f"Skipping {table_name}: column '{basis}' does not exist")
-                self._logger.warning(f"Table {table_name} skipped: no '{basis}' column")
-                continue
-
-            file_path = diff_dir / f"{table_name}_diff.csv"
-            try:
-                # Parameterised query
-                query = f'SELECT * FROM "{schema}"."{table_name}" WHERE {basis} > %s'
-                with self.connection.cursor() as cur:
-                    cur.execute(query, (last_backup_time,))
-                    rows = cur.fetchall()
-                    if not rows:
-                        self._messenger.info(f"No new rows in {table_name} since last backup")
-                        continue
-
-                    columns = [d[0] for d in cur.description]
-                    self._write_table_to_csv(file_path, columns, rows)
-                    file_size = file_path.stat().st_size
-
-                    exported_files[table_name] = {
-                        "table_name": table_name,
-                        "file_path": str(file_path),
-                        "rows_count": len(rows),
-                        "file_size": file_size
-                    }
-                    self._messenger.success(f"Diff {table_name}: {len(rows)} rows → {file_path.name}")
-                    self._logger.info(f"Diff export {table_name}: {len(rows)} rows, {file_size/1024:.2f} KB")
-
-            except Exception as e:
-                self._messenger.error(f"Diff export failed for {table_name}: {e}")
-                self._logger.error(f"Diff export failed for {table_name}: {e}")
-
-        if exported_files:
-            manifest_data["diff_chain"].append(diff_timestamp)
-            manifest_data["last_diff_timestamp"] = diff_timestamp
-            try:
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest_data, f, indent=4, ensure_ascii=False)
-                oschmod.set_mode(manifest_path, "600")
-                self._messenger.info(f"Manifest updated: {manifest_path}")
-            except Exception as e:
-                self._messenger.error(f"Failed to update manifest: {e}")
-                self._logger.error(f"Manifest update failed: {e}")
-
-        return exported_files
-
-    def perform_differential_backup(self, basis: str, tables: list = None):
-        self._messenger.warning("Starting differential backup...")
-
-        last_full_timestamp = self.get_last_full_backup_timestamp()
-        backup_location = self.get_output_path_from_last_full_backup()
-
-        if not last_full_timestamp or not backup_location:
-            self._messenger.error("No previous full backup found. Cannot perform differential backup.")
-            return False
-
-        if not tables:
-            tables = self.get_table_names_from_last_full_backup()
-            if not tables:
-                self._messenger.error("No tables found in last full backup.")
-                return False
-            tables = [("public", t) for t in tables]
-
-        self._messenger.info(f"Using basis column: {basis}")
-        self._messenger.info(f"Tables: {[t[1] for t in tables]}")
-
-        result = self.export_diff_table(
-            tables=tables,
-            last_backup_time=last_full_timestamp,
-            outpath=backup_location,
-            basis=basis
-        )
-
-        if result:
-            self._messenger.success("Differential backup completed successfully.")
-            return True
-        else:
-            self._messenger.error("Differential backup failed or no changes.")
-            return False
-        
-        
-    def get_last_backup_path(self) -> str | None:
-        catalog = BackupCatalog()
-        last_backup = catalog.get_last_backup()
-        if last_backup and last_backup.get("status") == "completed":
-            return last_backup.get("backup_location")
-        return None
-
-    def compress_backup(self, path):
-        """Compress a backup directory to zip."""
-        path = Path(path) if isinstance(path, str) else path
-        if not path.exists() or not path.is_dir():
-            self._messenger.error(f"Invalid path: {path}")
-            return False
-        try:
-            zip_path = shutil.make_archive(str(path), 'zip', str(path))
-            if zip_path:
-                self._messenger.info("\n" + "="*60)
-                self._messenger.success("Compressed backup location:")
-                self._messenger.info(zip_path)
-                self._messenger.info("="*60 + "\n")
-                return True
-            self._messenger.warning("Compression produced no file")
-            return False
-        except Exception as e:
-            self._messenger.error(f"Compression failed: {e}")
-            return False
+    def get_table_schema(self, table_name: str, schema: str = "public"):
+        """Delegate to SchemaExporter to fetch table schema info."""
+        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
+        return schema_exporter.get_table_schema(table_name, schema)
