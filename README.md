@@ -193,27 +193,6 @@ Contributions and bug fixes are welcome!
 * **Differential backup fails** → verify that tables have `updated_at` column with `timestamp` type.
 * **Permission errors on `.backup_diff/`** → the utility sets secure permissions (700/600) automatically.
 
-## Architecture
-
-```
-cli/
-  ├─ dbtool.py           # Entry point
-  ├─ interaction.py      # Interactive console
-  └─ validateconfig.py   # Configuration validation
-
-commands/
-  ├─ command_dispatcher.py  # Command pattern implementation
-  └─ registry.py            # Command registration
-
-services/
-  └─ backup_services.py     # Backup business logic
-
-console_utils.py         # Centralized messaging system
-custom_logging.py        # Backup logging & catalog
-factory.py               # Database client interface
-postgres_client.py       # PostgreSQL implementation
-```
-
 ## Contributing
 
 Issues and pull requests are welcome, especially for:
