@@ -1,5 +1,4 @@
-from abc import ABC, abstractmethod
-from postgres_client import PostgresClient
+from clients.postgres_client import PostgresClient
 
 class BackupService:
     def __init__(self, dbclient: PostgresClient) -> None:

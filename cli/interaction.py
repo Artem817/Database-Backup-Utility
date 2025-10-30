@@ -4,10 +4,12 @@ from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
+from typing import Union
 
 from commands.registry import build_dispatcher 
 
-from postgres_client import PostgresClient
+from clients.postgres_client import PostgresClient
+from clients.mysql_client import MysqlClient
 from console_utils import get_messenger, MessageLevel
 
 def print_sql_preview(rows: list, limit: int = 10):
@@ -72,7 +74,7 @@ class SQLCompleter(Completer):
                     yield Completion(cmd, start_position=-len(word_before_cursor))
 
 
-async def interactive_console(db_client: PostgresClient, dbname: str, user: str):
+async def interactive_console(db_client: Union[PostgresClient, MysqlClient], dbname: str, user: str):
     
     messenger = get_messenger()
     dispatcher =  build_dispatcher(db_client, messenger)    

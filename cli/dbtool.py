@@ -7,7 +7,8 @@ from colorama import init
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from postgres_client import PostgresClient
+from clients.postgres_client import PostgresClient
+from clients.mysql_client import MysqlClient  
 from cli.interaction import interactive_console
 from cli.validateconfig import validate_config
 from console_utils import get_messenger, configure_messenger
@@ -22,11 +23,14 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""
 Examples:
-  # Using .env file configuration
-  python dbtool.py backup --db postgres --database mydb --storage local --config file
+  # PostgreSQL  backup using .env file
+  python cli/dbtool.py backup --db postgres --database testdb --storage local --config file
+  
+  # MySQL backup using .env file  
+  python cli/dbtool.py backup --db mysql --database testdb --storage local --config file
   
   # Using manual configuration
-  python dptool.py backup --db postgres --database mydb --storage local --config manual \\
+  python cli/dbtool.py backup --db postgres --database testdb --storage local --config manual \\
     --host localhost --port 5432 --user admin --password secret
     """
 )
@@ -41,7 +45,7 @@ parser.add_argument(
     "--db", 
     required=True, 
     choices=["postgres", "mysql"], 
-    help="Database type (currently only postgres is fully implemented)"
+    help="Database type: postgres or mysql"
 )
 
 parser.add_argument(
@@ -85,10 +89,6 @@ try:
     if not port:
         port = "5432" if args.db == "postgres" else "3306"
 
-    if args.db == "mysql":
-        messenger.warning("MySQL support is not yet implemented. Only PostgreSQL is currently supported.")
-        sys.exit(EXIT_FAILURE)
-        
     if args.storage == "cloud":
         messenger.warning("Cloud storage is not yet implemented. Use --storage local instead.")
         sys.exit(EXIT_FAILURE)
@@ -104,13 +104,26 @@ try:
     messenger.info("")
 
     messenger.info("Initializing database client...")
-    db_client = PostgresClient(
-        host=host,
-        database=dbname,
-        user=user,
-        password=password,
-        port=int(port)
-    )
+    
+    if args.db == "postgres":
+        db_client = PostgresClient(
+            host=host,
+            database=dbname,
+            user=user,
+            password=password,
+            port=int(port)
+        )
+    elif args.db == "mysql":
+        db_client = MysqlClient(
+            host=host,
+            database=dbname,
+            user=user,
+            password=password,
+            port=int(port)
+        )
+    else:
+        messenger.error(f"Unsupported database type: {args.db}")
+        sys.exit(EXIT_FAILURE)
     
     configure_messenger(logger=db_client._logger.logger, enable_colors=True)
     messenger = get_messenger() 

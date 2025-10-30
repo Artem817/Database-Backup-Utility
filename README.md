@@ -8,7 +8,7 @@ An MVP utility for:
 - Maintaining **logs** and a **backup catalog** (`backup_catalog.json`)
 - An interactive console with autocompletion (prompt-toolkit)
 
-> **Scope (MVP):** supports **PostgreSQL only** and **local** storage. Currently, **incremental backup** is not supported.
+> **Scope (MVP):** supports **PostgreSQL and MySQL** and **local** storage. Currently, **incremental backup** is not supported.
 
 ## Features
 

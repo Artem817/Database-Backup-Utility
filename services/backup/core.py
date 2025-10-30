@@ -46,15 +46,28 @@ class DifferentialBackupService:
 
     def get_max_updated_at(self, table_name: str, schema: str, column: str):
         try:
-            query = f'SELECT MAX({column}) FROM "{schema}"."{table_name}"'
+            connection_params = self._connection_provider.get_connection_params()
+            
+            if connection_params.get("port") == 3306:
+                query = f'SELECT MAX(`{column}`) FROM `{table_name}`'
+            else:
+                query = f'SELECT MAX({column}) FROM "{schema}"."{table_name}"'
+                
             connection = self._connection_provider.get_connection()
             with connection.cursor() as cur:
                 cur.execute(query)
-                result = cur.fetchone()[0]
-                return result.isoformat() if result else "None"
+                result = cur.fetchone()
+                
+                if connection_params.get("port") == 3306:
+                    result_value = result[f'MAX(`{column}`)'] if isinstance(result, dict) else result[0]
+                else:
+                    result_value = result[0]
+                    
+                return result_value.isoformat() if result_value else "None"
         except Exception as e:
             self._logger.error(f"get_max_updated_at failed: {e}")
-            connection.rollback()
+            if hasattr(self._connection_provider.get_connection(), 'rollback'):
+                self._connection_provider.get_connection().rollback()
             return "Error"
 
     def export_diff_table(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
@@ -94,7 +107,13 @@ class DifferentialBackupService:
 
             file_path = diff_dir / f"{table_name}_diff.csv"
             try:
-                query = f'SELECT * FROM "{schema}"."{table_name}" WHERE {basis} > %s'
+                connection_params = self._connection_provider.get_connection_params()
+                
+                if connection_params.get("port") == 3306:
+                    query = f'SELECT * FROM `{table_name}` WHERE `{basis}` > %s'
+                else:
+                    query = f'SELECT * FROM "{schema}"."{table_name}" WHERE {basis} > %s'
+                
                 connection = self._connection_provider.get_connection()
                 with connection.cursor() as cur:
                     cur.execute(query, (last_backup_time,))
@@ -103,8 +122,14 @@ class DifferentialBackupService:
                         self._messenger.info(f"No new rows in {table_name} since last backup")
                         continue
 
-                    columns = [d[0] for d in cur.description]
-                    self._table_exporter._write_to_csv(file_path, columns, rows)
+                    if connection_params.get("port") == 3306:
+                        columns = list(rows[0].keys()) if rows else []
+                        row_data = [[row[col] for col in columns] for row in rows]
+                    else:
+                        columns = [d[0] for d in cur.description]
+                        row_data = rows
+                    
+                    self._table_exporter._write_to_csv(file_path, columns, row_data)
                     file_size = file_path.stat().st_size
 
                     exported_files[table_name] = {
@@ -158,7 +183,12 @@ class DifferentialBackupService:
             if not tables:
                 self._messenger.error("No tables found in last full backup.")
                 return False
-            tables = [("public", t) for t in tables]
+            
+            connection_params = self._connection_provider.get_connection_params()
+            if connection_params.get("port") == 3306:
+                tables = [(connection_params["database"], t) for t in tables]
+            else:
+                tables = [("public", t) for t in tables]
 
         self._messenger.info(f"Using basis column: {basis}")
         self._messenger.info(f"Tables: {[t[1] for t in tables]}")

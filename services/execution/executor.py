@@ -80,3 +80,4 @@ class QueryExecutor:
         else:
             self._logger.error("Query extraction failed")
         return result
+
