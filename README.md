@@ -8,7 +8,7 @@ An MVP utility for:
 - Maintaining **logs** and a **backup catalog** (`backup_catalog.json`)
 - An interactive console with autocompletion (prompt-toolkit)
 
-> **Scope (MVP):** supports **PostgreSQL and MySQL** and **local** storage. Currently, **incremental backup** is not supported.
+> **Scope (MVP):** The system supports **PostgreSQL, MySQL, and local storage**. Incremental backup is currently **unavailable**.
 
 ## Features
 
@@ -183,7 +183,6 @@ Contributions and bug fixes are welcome!
   - Tracking deleted records (only inserts/updates)
   - Automatic restore from differential chain
   - Cloud storage (S3, GCS, etc.)
-  - MySQL or other databases
 
 ## Notes & Troubleshooting
 
