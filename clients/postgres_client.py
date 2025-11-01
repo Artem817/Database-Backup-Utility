@@ -1,7 +1,8 @@
-import csv
+import os
 from pathlib import Path
 import psycopg2
 from psycopg2.extensions import connection
+from datetime import datetime
 
 from mixins.backup_catalog_mixin import BackupCatalogMixin
 from mixins.conection_config_mixin import ConnectionConfigMixin
@@ -11,8 +12,9 @@ from mixins.orchestration_mixin import BackupOrchestrationMixin
 from mixins.differential_mixin import DifferentialBackupMixin
 from services.backup.exporters import SchemaExporter
 from services.interfaces import IConnectionProvider
-from typing import Optional, Tuple, Any
+from typing import Optional, Tuple, Any, List
 from decorators.types_decorators import not_none
+import subprocess
 
 class PostgresClient(ConnectionConfigMixin,
                      BackupCatalogMixin,
@@ -126,42 +128,6 @@ class PostgresClient(ConnectionConfigMixin,
         schema_exporter = SchemaExporter(self, self._logger, self._messenger)
         return schema_exporter.export_schema(output_path)
 
-    @not_none('schema', 'table_name', 'file_path')
-    def _export_single_table(self, schema: str, table_name: str, file_path: Path, metadata: Any = None) -> dict[str, Any] | None:
-        """Export a single table to CSV."""
-        try:
-            if self._connection is None:
-                raise RuntimeError("No active database connection")
-                
-            full_table_name = f'"{schema}"."{table_name}"'
-            
-            with self._connection.cursor() as cur:
-                cur.execute(f"SELECT * FROM {full_table_name}")
-                rows = cur.fetchall()
-                columns = [d[0] for d in cur.description] if cur.description else []
-                
-                self._write_table_to_csv(file_path, columns, rows)
-                file_size = file_path.stat().st_size
-                
-                self._messenger.success(
-                    f"Exported {table_name}: {len(rows)} rows, {file_size/1024:.2f} KB"
-                )
-                
-                if metadata:
-                    self._log_table_backup(metadata, table_name, len(rows), file_size, str(file_path))
-                
-                return {
-                    "table_name": table_name,
-                    "file_path": str(file_path),
-                    "rows_count": len(rows),
-                    "file_size": file_size
-                }
-                
-        except Exception as e:
-            self._messenger.error(f"Export {table_name} failed: {e}")
-            self._logger.error(f"Table export failed for {table_name}: {e}")
-            return None
-
     def get_database_size(self) -> str:
         schema_exporter = SchemaExporter(self, self._logger, self._messenger)
         return schema_exporter.get_database_size()
@@ -171,3 +137,198 @@ class PostgresClient(ConnectionConfigMixin,
         from services.execution.executor import QueryExecutor
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
+
+    def create_full_backup_zstd(self):
+        """Create full backup using zstd, unique function for PostgresClient"""
+        pass   
+
+    def backup_full(self, outpath: str) -> bool:
+        """Creates a full PostgreSQL backup, compressing it with Zstd"""
+        base_path = Path(outpath) if isinstance(outpath, str) else outpath
+        self._messenger.info(f"Starting full backup → {base_path}")
+        
+        metadata = self._logger.start_backup(
+            backup_type="full",
+            database=self._database,
+            database_version=self._database_version or "Unknown",
+            utility_version=self._utility_version,
+            compress=True 
+        )
+        
+        timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
+        
+        backup_structure = self._create_backup_structure(
+            base_path, 
+            metadata["id"],
+            back_up_time=metadata["timestamp_start"]  # Pass ISO string
+        )
+        
+        backup_filename = f"{self._database}_{timestamp_start.strftime('%Y%m%d_%H%M%S')}.sql.zst"
+        backup_file_path = backup_structure["backup_root"] / backup_filename
+        
+        pg_dump_cmd = [
+            "pg_dump",
+            "-h", self._host,
+            "-p", str(self._port),
+            "-U", self._user,
+            "-Fc",
+            self._database
+        ]
+    
+        zstd_cmd = [
+            "zstd",
+            "-o", str(backup_file_path),
+            "-"
+        ]
+        
+        env = os.environ.copy()
+        env['PGPASSWORD'] = self._password
+        
+        try:
+            pg_dump_process = subprocess.Popen(
+                pg_dump_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
+            )
+
+            zstd_process = subprocess.Popen(
+                zstd_cmd,
+                stdin=pg_dump_process.stdout,
+                stderr=subprocess.PIPE
+            )
+            
+            pg_dump_process.stdout.close()
+            
+            pg_dump_process.wait()
+            zstd_process.wait()
+            
+            if pg_dump_process.returncode != 0:
+                _, pg_dump_stderr = pg_dump_process.communicate()
+                self._messenger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
+                self._logger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+                
+            if zstd_process.returncode != 0:
+                _, zstd_stderr = zstd_process.communicate()
+                self._messenger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
+                self._logger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            self._messenger.success(f"Full backup created at {backup_file_path}")
+            self._logger.info(f"Full backup file: {backup_file_path}")
+            metadata["backup_location"] = str(backup_structure["backup_root"]) 
+            self._logger.finish_backup(metadata, success=True)
+            return True
+        
+        except Exception as e:
+            self._messenger.error(f"Backup failed: {e}")
+            self._logger.error(f"Backup failed: {e}")
+            self._logger.finish_backup(metadata, success=False)
+            return False
+        
+    def partial_backup(self, tables: List[str], outpath: str, backup_type: str = "partial") -> bool:
+        """Creates a partial PostgreSQL backup for specified tables, compressing it with Zstd"""
+        
+        if not tables:
+            self._messenger.error("No tables specified for partial backup")
+            return False
+            
+        base_path = Path(outpath) if isinstance(outpath, str) else outpath
+        tables_str = ", ".join(tables)
+        self._messenger.info(f"Starting partial backup of tables [{tables_str}] → {base_path}")
+        
+        metadata = self._logger.start_backup(
+            backup_type=backup_type,
+            database=self._database,
+            database_version=self._database_version or "Unknown",
+            utility_version=self._utility_version,
+            compress=True 
+        )
+        
+        timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
+        
+        backup_structure = self._create_backup_structure(
+            base_path, 
+            metadata["id"],
+            back_up_time=metadata["timestamp_start"]  # Pass ISO string
+        )
+        
+        backup_filename = f"{self._database}_partial_{timestamp_start.strftime('%Y%m%d_%H%M%S')}.sql.zst"
+        backup_file_path = backup_structure["backup_root"] / backup_filename
+        
+        pg_dump_cmd = [
+            "pg_dump",
+            "-h", self._host,
+            "-p", str(self._port),
+            "-U", self._user,
+            "-Fc"
+        ]
+        
+        for table in tables:
+            pg_dump_cmd.extend(["-t", table])
+            
+        pg_dump_cmd.append(self._database)
+        
+        zstd_cmd = [
+            "zstd",
+            "-o", str(backup_file_path),
+            "-"
+        ]
+        
+        env = os.environ.copy()
+        env['PGPASSWORD'] = self._password
+        
+        try:
+            pg_dump_process = subprocess.Popen(
+                pg_dump_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env
+            )
+
+            zstd_process = subprocess.Popen(
+                zstd_cmd,
+                stdin=pg_dump_process.stdout,
+                stderr=subprocess.PIPE
+            )
+            
+            pg_dump_process.stdout.close()
+            
+            pg_dump_process.wait()
+            zstd_process.wait()
+            
+            if pg_dump_process.returncode != 0:
+                _, pg_dump_stderr = pg_dump_process.communicate()
+                self._messenger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
+                self._logger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+                
+            if zstd_process.returncode != 0:
+                _, zstd_stderr = zstd_process.communicate()
+                self._messenger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
+                self._logger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            self._messenger.success(f"Partial backup created at {backup_file_path}")
+            self._messenger.info(f"Backed up tables: {tables_str}")
+            self._logger.info(f"Partial backup file: {backup_file_path}")
+            self._logger.info(f"Tables included: {tables_str}")
+            metadata["backup_location"] = str(backup_structure["backup_root"])  # Save directory, not file path
+            metadata["tables"] = tables
+            self._logger.finish_backup(metadata, success=True)
+            return True
+        
+        except Exception as e:
+            self._messenger.error(f"Partial backup failed: {e}")
+            self._logger.error(f"Partial backup failed: {e}")
+            self._logger.finish_backup(metadata, success=False)
+            return False
+
+
+
+

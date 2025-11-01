@@ -9,11 +9,7 @@ class BackupService:
         if not parsed_args.path:
             raise ValueError("Path is required. Use: full database -path <path>")
         
-        self.dbclient.backup_full(
-            outpath=parsed_args.path, 
-            export_type="csv", 
-            compress=parsed_args.compress
-        )
+        self.dbclient.backup_full(outpath=parsed_args.path)
     
     def partial_backup(self, parsed_args) -> None:
         """Handle partial table backup with parsed arguments"""
@@ -24,8 +20,7 @@ class BackupService:
         
         self.dbclient.partial_backup(
             tables=parsed_args.tablename, 
-            outpath=parsed_args.path, 
-            compress=parsed_args.compress
+            outpath=parsed_args.path
         )
     
     def differential_backup(self, parsed_args) -> None:

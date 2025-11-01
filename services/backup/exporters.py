@@ -5,7 +5,6 @@ from pathlib import Path
 
 from services.interfaces import IConnectionProvider, IMessenger, ILogger
 
-
 class SchemaExporter:
     def __init__(self, 
                  connection_provider: IConnectionProvider,

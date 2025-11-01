@@ -46,11 +46,13 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def backup_full(self, outpath, export_type: str = "csv", compress: bool = False):
+    def backup_full(self, outpath: str) -> bool:
+        """Create full database backup with zstd compression"""
         pass
 
     @abstractmethod
-    def partial_backup(self, tables, outpath, backup_type: str = "partial", compress: bool = False):
+    def partial_backup(self, tables, outpath, backup_type: str = "partial") -> bool:
+        """Create partial backup for specified tables with zstd compression"""
         pass
 
     @abstractmethod
