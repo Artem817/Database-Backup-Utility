@@ -200,10 +200,11 @@ Contributions and bug fixes are welcome!
 
 ### 📋 **Current Limitations**
 
-**Differential backups require:**
-- A previous full backup exists
-- Tables have `updated_at` (or similar) timestamp column
-- Column must be consistently updated on record changes
+**PostgreSQL:**
+- **Full backup**: Production-ready WAL-based
+- **Differential**: MVP approach using `updated_at` (not WAL-based)
+- **No PITR** yet (foundation exists, implementation planned)
+- **No WAL archiving** for continuous backup
 
 **Not supported:**
 - Tracking deleted records (only inserts/updates)

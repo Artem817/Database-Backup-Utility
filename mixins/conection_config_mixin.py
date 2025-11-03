@@ -2,7 +2,7 @@ from console_utils import get_messenger
 from custom_logging import BackupLogger
 
 class ConnectionConfigMixin:
-    def __init__(self, host, database, user, password, logger: BackupLogger = None, messenger=None, port=5432,
+    def __init__(self, host, database, user, password, _compressing_level = 4, logger: BackupLogger = None, messenger=None, port=5432,
                      utility_version="1.0.0"):
         self._host = host
         self._database = database
@@ -15,6 +15,7 @@ class ConnectionConfigMixin:
         self._logger = logger if logger is not None else BackupLogger(name=f"backup_{database}",
                                                                       log_file=f"backup_{database}.log")
         self._messenger = messenger if messenger is not None else get_messenger()
+        self._compressing_level = _compressing_level #TODO CLI REQUEST
 
     @property
     def database_name(self):

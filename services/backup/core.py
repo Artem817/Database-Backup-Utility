@@ -161,23 +161,19 @@ class DifferentialBackupService:
     def _create_postgres_differential_backup(self, tables, last_backup_time, output_file, basis, connection_params):
         """Create PostgreSQL differential backup using pg_dump with WHERE conditions"""
         
-        temp_sql = output_file.parent / f"temp_diff_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
-        
         try:
-            with open(temp_sql, 'w') as f:
-                for schema, table_name in tables:
-                    f.write(f"-- Differential data for {schema}.{table_name}\n")
-                    f.write(f"COPY (SELECT * FROM \"{schema}\".\"{table_name}\" WHERE {basis} > '{last_backup_time.isoformat()}') TO STDOUT;\n")
-            
+            # Use pg_dump with data-only and table filters
             pg_dump_cmd = [
                 "pg_dump",
                 "-h", connection_params["host"],
                 "-p", str(connection_params["port"]),
                 "-U", connection_params["user"],
                 "-d", connection_params["database"],
-                "--data-only"
+                "--data-only",
+                "-Fc"  # Custom format for better compression
             ]
             
+            # Add table specifications for differential data
             for schema, table_name in tables:
                 pg_dump_cmd.extend(["-t", f"{schema}.{table_name}"])
             
@@ -207,20 +203,21 @@ class DifferentialBackupService:
             pg_dump_process.wait()
             zstd_process.wait()
             
-            # Clean up temp file
-            if temp_sql.exists():
-                temp_sql.unlink()
-            
             if pg_dump_process.returncode == 0 and zstd_process.returncode == 0:
                 return True
             else:
-                self._logger.error("pg_dump or zstd failed in differential backup")
+                _, pg_stderr = pg_dump_process.communicate() if pg_dump_process.returncode != 0 else (None, None)
+                _, zstd_stderr = zstd_process.communicate() if zstd_process.returncode != 0 else (None, None)
+                
+                if pg_stderr:
+                    self._logger.error(f"pg_dump failed: {pg_stderr.decode()}")
+                if zstd_stderr:
+                    self._logger.error(f"zstd failed: {zstd_stderr.decode()}")
+                    
                 return False
                 
         except Exception as e:
             self._logger.error(f"PostgreSQL differential backup failed: {e}")
-            if temp_sql.exists():
-                temp_sql.unlink()
             return False
 
     def _create_mysql_differential_backup(self, tables, last_backup_time, output_file, basis, connection_params):
