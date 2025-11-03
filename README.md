@@ -1,32 +1,41 @@
 # DB Backup Utility (PostgreSQL & MySQL → ZSTD)
 
-An MVP utility for creating efficient database backups using native database utilities and modern compression:
-- **Full or partial** database backups to **compressed SQL** (.sql.zst)
-- **Differential backups** based on timestamp columns (e.g., `updated_at`)
-- **Native database utilities** (`pg_dump`, `mysqldump`) for optimal performance
-- **ZSTD compression** for superior compression ratios
+An MVP utility for creating efficient database backups using native database utilities:
+- **PostgreSQL**: WAL-based backups with `pg_basebackup` (binary format)
+- **MySQL**: Traditional backups with `mysqldump` (SQL dumps)
+- **Full or partial** database backups with native compression
+- **Differential backups** based on timestamp columns (MVP approach)
+- **SQL execution** with optional CSV export
 - **Backup catalog** tracking with detailed metadata
 - Interactive console with autocompletion (prompt-toolkit)
 
-> **Scope (MVP):** Supports **PostgreSQL, MySQL** with **local storage**. Uses native database tools for reliability and performance.
+> **Scope (MVP):** Supports **PostgreSQL, MySQL** with **local storage**. PostgreSQL uses WAL-based architecture, MySQL uses traditional dumps.
 
 ## Features
 
-**Full Backup** - Complete database snapshot using native utilities  
-**Partial Backup** - Selected tables only with zstd compression  
-**Differential Backup** - Only changed rows since last full backup  
+**🗄️ Full Backup** 
+- **PostgreSQL**: Binary backup with pg_basebackup + WAL streaming
+- **MySQL**: SQL dump with mysqldump + zstd compression
+
+**Partial Backup** - Selected tables only (both databases)  
+**Differential Backup** - Only changed rows since last full backup (MVP: updated_at based)  
 **SQL Execution** - Run queries and export results to CSV  
-**ZSTD Compression** - Superior compression for all backup types  
+**Native Compression** - Built-in compression for optimal performance  
+**Backup Catalog** - Track all backups with detailed metadata  
 **Backup Catalog** - Track all backups with detailed metadata  
 
 ## Requirements
 
 - Python 3.10+
-- **PostgreSQL**: `pg_dump` available in PATH
-- **MySQL**: `mysqldump` available in PATH  
-- **ZSTD**: `zstd` command-line tool installed
+- **PostgreSQL**: 
+  - `pg_basebackup` available in PATH
+  - User must have REPLICATION privilege
+  - PostgreSQL 10+ recommended
+- **MySQL**: 
+  - `mysqldump` available in PATH
+  - Standard user privileges sufficient
 - Linux/macOS/Windows
-
+  
 > **Note:** Use destination **paths without spaces** for backup operations.
 
 ## Installation
@@ -118,17 +127,24 @@ SQL SELECT * FROM users WHERE id < 100
 ```bash
 SQL SELECT id, email FROM users WHERE is_active = true -extract -path /tmp/exports
 ```
+> **Requires:** Previous full backup and tables with `updated_at` timestamp column.
+> **Note:** This is MVP approach; WAL-based incremental backup is planned.
 
 ## Technical Details
 
 ### Backup Methods
 
-**PostgreSQL:**
-- **Full**: `pg_dump -Fc database | zstd → database.sql.zst`
-- **Partial**: `pg_dump -Fc -t table1 -t table2 | zstd → database_partial.sql.zst`
+**PostgreSQL (WAL-based):**
+- **Full**: `pg_basebackup -F t -X stream --checkpoint=fast`
+  - Binary tar format with WAL streaming
+  - ACID-compliant consistent snapshot
+  - Native compression support
+  - Requires REPLICATION privilege
+- **Partial**: `pg_dump -Fc -t table1 -t table2 | zstd`
 - **Differential**: `pg_dump --data-only --where="updated_at > timestamp" | zstd`
+  - ⚠️ MVP approach, not WAL-based (planned for future)
 
-**MySQL:**
+**MySQL (Traditional):**
 - **Full**: `mysqldump --single-transaction database | zstd → database.sql.zst`  
 - **Partial**: `mysqldump --single-transaction database table1 table2 | zstd`
 - **Differential**: `mysqldump --no-create-info --where="updated_at > timestamp" | zstd`
@@ -214,15 +230,21 @@ Contributions and bug fixes are welcome!
 
 ## Troubleshooting
 
-**Common Issues:**
+**PostgreSQL specific:**
+* **`FATAL: must be superuser or replication role`** → Grant REPLICATION privilege:
+  ```sql
+  ALTER USER your_user REPLICATION;
+  ```
+* **`pg_basebackup: command not found`** → Install PostgreSQL client tools
 
-* **Dangerous SQL** (`DROP`, `DELETE`, `TRUNCATE`, `ALTER`) require confirmation in TTY; in non-TTY mode they are skipped.
-* **`pg_dump failed`** → Ensure PostgreSQL client tools are installed and in PATH
-* **`mysqldump failed`** → Ensure MySQL client tools are installed and in PATH  
-* **`zstd command not found`** → Install zstd compression tool
-* **System schemas** (`pg_catalog`, `information_schema`) are not backed up.
+**MySQL specific:**
+* **`mysqldump failed`** → Ensure MySQL client tools are installed
+* **Permission denied** → Check user has SELECT privilege on all tables
+
+**Common issues:**
+* **Dangerous SQL** (`DROP`, `DELETE`) require confirmation in interactive mode
+* **System schemas** (`pg_catalog`, `information_schema`) are not backed up
 * **Differential backup fails** → Verify tables have `updated_at` timestamp column
-* **Permission errors on `.backup_diff/`** → The utility sets secure permissions (700/600) automatically.
 
 ## Performance Tips
 
