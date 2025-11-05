@@ -58,6 +58,7 @@ class BackupLogger:
             "database_type": "postgresql",
             "database_version": database_version,
             "database_name": database,
+            "backup_manifest_path" :"",
             "timestamp_start": timestamp_start.isoformat(),
             "timestamp_end": None,
             "duration_seconds": None,

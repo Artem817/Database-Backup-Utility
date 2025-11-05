@@ -6,23 +6,19 @@ from datetime import datetime
 
 from mixins.backup_catalog_mixin import BackupCatalogMixin
 from mixins.conection_config_mixin import ConnectionConfigMixin
-from factory import DatabaseClient
-from mixins.facade_mixin import ServiceFacadeMixin
-from mixins.orchestration_mixin import BackupOrchestrationMixin
 from mixins.differential_mixin import DifferentialBackupMixin
-from services.backup.exporters import SchemaExporter
+from factory import DatabaseClient
 from services.interfaces import IConnectionProvider
 from typing import Optional, Tuple, Any, List
 from decorators.types_decorators import not_none
 import subprocess
-from decorators.replication_privilege import requires_replication_privilege
+from decorators.replication_privilege import requires_replication_privilege, _check_wal_level
 from decorators.check_basebackup_decorator import check_basebackup
+import json
 
 class PostgresClient(ConnectionConfigMixin,
                      BackupCatalogMixin,
-                     BackupOrchestrationMixin,
                      DifferentialBackupMixin,
-                     ServiceFacadeMixin,
                      DatabaseClient,
                      IConnectionProvider):
 
@@ -32,7 +28,6 @@ class PostgresClient(ConnectionConfigMixin,
         super().__init__(host, database, user, password, **kwargs)
         self._connection: Optional[connection] = None
 
-    # unique
     def connect(self) -> Optional[connection]:
         try:
             self._connection = psycopg2.connect(
@@ -61,7 +56,6 @@ class PostgresClient(ConnectionConfigMixin,
             self._logger.error(f"Connection failed: {e}")
             return None
 
-    # unique
     def disconnect(self) -> None:
         try:
             if self._connection and not self._connection.closed:
@@ -69,7 +63,6 @@ class PostgresClient(ConnectionConfigMixin,
                 self._connection = None
                 self._messenger.info("Disconnected from database.")
                 self._logger.info("Database connection closed")
-
         except psycopg2.OperationalError as e:
             self._messenger.error(f"Error on disconnect: {e}")
             self._logger.error(f"Disconnect failed: {e}")
@@ -124,30 +117,17 @@ class PostgresClient(ConnectionConfigMixin,
         except Exception:
             return False
 
-    @not_none('output_path')
-    def database_schema(self, output_path: Path) -> str | None:
-        """Export database schema using pg_dump."""
-        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
-        return schema_exporter.export_schema(output_path)
-
-    def get_database_size(self) -> str:
-        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
-        return schema_exporter.get_database_size()
-
     @not_none('query')
     def execute_query(self, query: str) -> Any:
         from services.execution.executor import QueryExecutor
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
-
-    def create_full_backup_zstd(self):
-        """Create full backup using zstd, unique function for PostgresClient"""
-        pass   
     
+    @_check_wal_level
     @check_basebackup
     @requires_replication_privilege
     def backup_full(self, outpath: str) -> bool:
-        """Creates a full PostgreSQL backup using pg_basebackup"""
+        """Creates a full PostgreSQL backup using pg_basebackup with WAL archiving"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full backup → {base_path}")
         
@@ -155,46 +135,41 @@ class PostgresClient(ConnectionConfigMixin,
             backup_type="full",
             database=self._database,
             database_version=self._database_version or "Unknown",
-            utility_version=self._utility_version,
+            utility_version="pg_basebackup",
             compress=True 
         )
         
         timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
+        backup_id = metadata["id"]
         
-        backup_structure = self._create_backup_structure(
-            base_path, 
-            metadata["id"],
-            back_up_time=metadata["timestamp_start"]
-        )
-        
-        # pg_basebackup creates directory structure itself
-        backup_dir = backup_structure["backup_root"] / "base"
+        backup_dir = base_path / backup_id
+        backup_dir.mkdir(parents=True, exist_ok=True)
         
         pg_basebackup_cmd = [
             "pg_basebackup",
             "-h", self._host,
             "-p", str(self._port),
             "-U", self._user,
-            "-D", str(backup_dir),     # Directory for backup
-            "-F", "t",                 # Tar format
-            "-X", "stream",            # Stream WAL during backup (better than fetch)
-            "--checkpoint=fast"        # Force immediate checkpoint
-        ]              
+            "-D", str(backup_dir),
+            "-F", "t",  # tar format 
+            "-X", "stream",  
+            "-c", "fast",  
+            "-P", 
+            "-v"  
+        ]
         
-        # Add compression if specified
         if hasattr(self, '_compressing_level') and self._compressing_level:
             pg_basebackup_cmd.extend(["-z", "-Z", str(self._compressing_level)])
+        else:
+            pg_basebackup_cmd.extend(["-z", "-Z", "6"])
         
-        # Set progress reporting
-        pg_basebackup_cmd.append("-P")
-                        
         env = os.environ.copy()
         env['PGPASSWORD'] = self._password
         
         try:
             self._messenger.info("Running pg_basebackup... (this may take a while)")
             
-            pg_basebackup_process = subprocess.run(
+            process = subprocess.run(
                 pg_basebackup_cmd,
                 capture_output=True,
                 env=env,
@@ -202,137 +177,56 @@ class PostgresClient(ConnectionConfigMixin,
                 text=True
             )
             
-            if pg_basebackup_process.returncode != 0:
-                error_msg = pg_basebackup_process.stderr or "Unknown error"
+            if process.returncode != 0:
+                error_msg = process.stderr or "Unknown error"
                 self._messenger.error(f"pg_basebackup failed: {error_msg}")
                 self._logger.error(f"pg_basebackup failed: {error_msg}")
                 self._logger.finish_backup(metadata, success=False)
                 return False
             
-            # Check if backup was created
-            if not backup_dir.exists():
-                self._messenger.error("Backup directory was not created")
-                self._logger.error("Backup directory was not created")
+            base_tar = backup_dir / "base.tar.gz"
+            wal_tar = backup_dir / "pg_wal.tar.gz"
+            
+            if not base_tar.exists():
+                self._messenger.error("base.tar.gz not found - backup may be incomplete")
+                self._logger.error("base.tar.gz file not found")
                 self._logger.finish_backup(metadata, success=False)
                 return False
             
-            # Calculate backup size
+            # Check for backup_manifest (PostgreSQL 13+)
+            manifest_path = backup_dir / "backup_manifest"
+            if manifest_path.exists():
+                metadata["backup_manifest_path"] = str(manifest_path)
+                self._messenger.success(f"Backup manifest found at {manifest_path}")
+                self._logger.info(f"Backup manifest path: {manifest_path}")
+            else:
+                self._messenger.warning("Backup manifest not found (PostgreSQL < 13)")
+                metadata["backup_manifest_path"] = ""
+            
             total_size = sum(f.stat().st_size for f in backup_dir.rglob('*') if f.is_file())
             
             self._messenger.success(f"Full backup created at {backup_dir}")
+            self._messenger.info(f"Files: base.tar.gz, pg_wal.tar.gz")
             self._messenger.info(f"Backup size: {total_size / (1024**2):.2f} MB")
             self._logger.info(f"Full backup directory: {backup_dir}")
             self._logger.info(f"Backup size: {total_size} bytes")
             
-            metadata["backup_location"] = str(backup_structure["backup_root"])
+            metadata["backup_location"] = str(backup_dir)
             metadata["backup_size_bytes"] = total_size
+            metadata["wal_archived"] = True
+            metadata["backup_format"] = "tar+gzip"
+            
+            metadata_file = backup_dir / "metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
+            self._messenger.info(f"Metadata saved: {metadata_file}")
+            
             self._logger.finish_backup(metadata, success=True)
             return True
         
         except Exception as e:
             self._messenger.error(f"Backup failed: {e}")
             self._logger.error(f"Backup failed: {e}")
-            self._logger.finish_backup(metadata, success=False)
-            return False
-    
-    #FIXME pg_dump 
-    def partial_backup(self, tables: List[str], outpath: str, backup_type: str = "partial") -> bool:
-        """Creates a partial PostgreSQL backup for specified tables, compressing it with Zstd"""
-        
-        if not tables:
-            self._messenger.error("No tables specified for partial backup")
-            return False
-            
-        base_path = Path(outpath) if isinstance(outpath, str) else outpath
-        tables_str = ", ".join(tables)
-        self._messenger.info(f"Starting partial backup of tables [{tables_str}] → {base_path}")
-        
-        metadata = self._logger.start_backup(
-            backup_type=backup_type,
-            database=self._database,
-            database_version=self._database_version or "Unknown",
-            utility_version=self._utility_version,
-            compress=True 
-        )
-        
-        timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
-        
-        backup_structure = self._create_backup_structure(
-            base_path, 
-            metadata["id"],
-            back_up_time=metadata["timestamp_start"]  # Pass ISO string
-        )
-        
-        backup_filename = f"{self._database}_partial_{timestamp_start.strftime('%Y%m%d_%H%M%S')}.sql.zst"
-        backup_file_path = backup_structure["backup_root"] / backup_filename
-        
-        pg_dump_cmd = [
-            "pg_dump",
-            "-h", self._host,
-            "-p", str(self._port),
-            "-U", self._user,
-            "-Fc"
-        ]
-        
-        for table in tables:
-            pg_dump_cmd.extend(["-t", table])
-            
-        pg_dump_cmd.append(self._database)
-        
-        zstd_cmd = [
-            "zstd",
-            "-o", str(backup_file_path),
-            "-"
-        ]
-        
-        env = os.environ.copy()
-        env['PGPASSWORD'] = self._password
-        
-        try:
-            pg_dump_process = subprocess.Popen(
-                pg_dump_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env
-            )
-
-            zstd_process = subprocess.Popen(
-                zstd_cmd,
-                stdin=pg_dump_process.stdout,
-                stderr=subprocess.PIPE
-            )
-            
-            pg_dump_process.stdout.close()
-            
-            pg_dump_process.wait()
-            zstd_process.wait()
-            
-            if pg_dump_process.returncode != 0:
-                _, pg_dump_stderr = pg_dump_process.communicate()
-                self._messenger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
-                self._logger.error(f"pg_dump failed: {pg_dump_stderr.decode()}")
-                self._logger.finish_backup(metadata, success=False)
-                return False
-                
-            if zstd_process.returncode != 0:
-                _, zstd_stderr = zstd_process.communicate()
-                self._messenger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
-                self._logger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
-                self._logger.finish_backup(metadata, success=False)
-                return False
-            
-            self._messenger.success(f"Partial backup created at {backup_file_path}")
-            self._messenger.info(f"Backed up tables: {tables_str}")
-            self._logger.info(f"Partial backup file: {backup_file_path}")
-            self._logger.info(f"Tables included: {tables_str}")
-            metadata["backup_location"] = str(backup_structure["backup_root"])  # Save directory, not file path
-            metadata["tables"] = tables
-            self._logger.finish_backup(metadata, success=True)
-            return True
-        
-        except Exception as e:
-            self._messenger.error(f"Partial backup failed: {e}")
-            self._logger.error(f"Partial backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
 

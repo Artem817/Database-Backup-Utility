@@ -45,6 +45,9 @@ class BackupMetadataReader:
     def get_last_full_backup_timestamp(self) -> str | None:
         return self._get_last_full_backup_info("timestamp")
     
+    def last_full_manifest_path(self) -> str | None:
+        return self._get_last_full_backup_info("backup_manifest_path")
+    
     def get_table_names_from_last_full_backup(self) -> list[str]:
         return self._get_last_full_backup_info("tables") or []
  
@@ -53,11 +56,13 @@ class BackupMetadataReader:
         self._messenger.info(f"self._database: {self._database}")
         return self._get_last_full_backup_info("backup_location")
     
+    def get_backup_diff_outpath(self) -> str | None:
+        return self._get_last_full_backup_info("backup_diff_path")
+    
     def get_backup_history(self, limit: int = 10) -> list:
         backups = self._get_backups()
         sorted_backups = sorted(backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
         return sorted_backups[:limit]
-
 
 class BackupHistoryService:
     def __init__(self, metadata_reader, messenger: IMessenger):

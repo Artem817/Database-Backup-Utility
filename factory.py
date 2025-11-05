@@ -10,39 +10,7 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def fetch_all(self, query):
-        pass
-
-    @abstractmethod
-    def fetch_one(self, query):
-        pass
-
-    @abstractmethod
-    def commit(self):
-        pass
-
-    @abstractmethod
-    def rollback(self):
-        pass
-
-    @abstractmethod
-    def table_exists(self, table_name):
-        pass
-
-    @abstractmethod
-    def export_table(self, tables, outpath, metadata=None):
-        pass
-
-    @abstractmethod
     def execute_query(self, query):
-        pass
-
-    @abstractmethod
-    def get_tables(self):
-        pass
-
-    @abstractmethod
-    def get_table_schema(self, table_name):
         pass
 
     @abstractmethod
@@ -51,16 +19,7 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def partial_backup(self, tables, outpath, backup_type: str = "partial") -> bool:
-        """Create partial backup for specified tables with zstd compression"""
-        pass
-
-    @abstractmethod
     def validate_connection(self):
-        pass
-
-    @abstractmethod
-    def get_database_size(self):
         pass
 
     @property

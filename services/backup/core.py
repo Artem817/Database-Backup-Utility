@@ -7,327 +7,311 @@ import os
 
 import oschmod
 
+from services.backup.metadata import BackupMetadataReader
 from services.interfaces import IConnectionProvider, ILogger, IMessenger
-
-class CompressionService:
-    def __init__(self, logger: ILogger, messenger: IMessenger):
-        self._logger = logger
-        self._messenger = messenger
-
-    def compress_backup(self, path):
-        """Compress a backup directory to zip."""
-        path = Path(path) if isinstance(path, str) else path
-        if not path.exists() or not path.is_dir():
-            self._messenger.error(f"Invalid path: {path}")
-            return False
-        try:
-            zip_path = shutil.make_archive(str(path), 'zip', str(path))
-            if zip_path:
-                self._messenger.info("\n" + "="*60)
-                self._messenger.success("Compressed backup location:")
-                self._messenger.info(zip_path)
-                self._messenger.info("="*60 + "\n")
-                return True
-            self._messenger.warning("Compression produced no file")
-            return False
-        except Exception as e:
-            self._messenger.error(f"Compression failed: {e}")
-            return False
 
 class DifferentialBackupService:
     def __init__(self,
                  connection_provider: IConnectionProvider,
                  logger: ILogger,
-                 messenger: IMessenger,
-                 schema_exporter,
-                 table_exporter):
+                 messenger: IMessenger):
         self._connection_provider = connection_provider
         self._logger = logger
         self._messenger = messenger
-        self._schema_exporter = schema_exporter
-        self._table_exporter = table_exporter
 
-    def get_max_updated_at(self, table_name: str, schema: str, column: str):
+    def perform_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
+        """Creates a differential backup using WAL archiving (PostgreSQL) or xtrabackup (MySQL)"""
+        connection_params = self._connection_provider.get_connection_params()
+        
+        if connection_params.get("port") == 3306:
+            # MySQL incremental backup using xtrabackup
+            return self._perform_mysql_differential_backup(metadata_reader)
+        else:
+            # PostgreSQL differential backup using WAL archiving
+            return self._perform_postgres_differential_backup(metadata_reader)
+    
+    def _perform_postgres_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
+        """Creates a differential PostgreSQL backup by archiving WAL files since last full backup"""
+        self._messenger.warning("Starting differential WAL backup...")
+        
+        connection_params = self._connection_provider.get_connection_params()
+        
+        metadata = self._logger.start_backup(
+            backup_type="differential",
+            database=connection_params["database"],
+            database_version="WAL-based",
+            utility_version="pg_wal_archiving",
+            compress=True 
+        )
+        
+        last_full_backup_location = metadata_reader.get_output_path_from_last_full_backup()
+        last_full_timestamp = metadata_reader.get_last_full_backup_timestamp()
+        
+        if not last_full_backup_location or not last_full_timestamp:
+            self._messenger.error("No previous full backup found. Cannot perform differential backup.")
+            self._logger.finish_backup(metadata, success=False)
+            return False
+        
+        full_backup_path = Path(last_full_backup_location)
+        differentials_dir = full_backup_path / "differentials"
+        
+        if not differentials_dir.exists():
+            differentials_dir.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        diff_backup_dir = differentials_dir / f"diff_{timestamp}_{metadata['id'].split('_')[-1]}"
+        diff_backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        wal_archive_dir = diff_backup_dir / "wal_archive"
+        wal_archive_dir.mkdir(parents=True, exist_ok=True)
+        
         try:
-            connection_params = self._connection_provider.get_connection_params()
-            
-            if connection_params.get("port") == 3306:
-                query = f'SELECT MAX(`{column}`) FROM `{table_name}`'
-            else:
-                query = f'SELECT MAX({column}) FROM "{schema}"."{table_name}"'
-                
             connection = self._connection_provider.get_connection()
             with connection.cursor() as cur:
-                cur.execute(query)
-                result = cur.fetchone()
+                cur.execute("SELECT pg_current_wal_lsn();")
+                current_lsn = cur.fetchone()[0]
                 
-                if connection_params.get("port") == 3306:
-                    result_value = result[f'MAX(`{column}`)'] if isinstance(result, dict) else result[0]
-                else:
-                    result_value = result[0]
+                cur.execute("SELECT pg_walfile_name(pg_current_wal_lsn());")
+                current_wal_file = cur.fetchone()[0]
+                
+                cur.execute("SHOW data_directory;")
+                data_dir = cur.fetchone()[0]
+                
+                full_backup_wal = full_backup_path / "pg_wal.tar.gz"
+                
+                if not full_backup_wal.exists():
+                    self._messenger.error(f"Full backup WAL archive not found: {full_backup_wal}")
+                    self._logger.finish_backup(metadata, success=False)
+                    return False
+                
+                import tarfile
+                import tempfile
+                
+                last_backup_wal_file = None
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with tarfile.open(full_backup_wal, 'r:gz') as tar:
+                        wal_members = [m for m in tar.getmembers() if m.isfile() and not m.name.endswith('.history')]
+                        if wal_members:
+                            wal_members.sort(key=lambda x: x.name)
+                            last_backup_wal_file = wal_members[-1].name.split('/')[-1]
+                
+                if not last_backup_wal_file:
+                    self._messenger.warning("Could not determine last WAL file from full backup")
+                    last_backup_wal_file = "000000010000000000000001"
+                
+                self._messenger.info(f"Last full backup WAL file: {last_backup_wal_file}")
+                self._messenger.info(f"Current WAL LSN: {current_lsn}")
+                self._messenger.info(f"Current WAL file: {current_wal_file}")
+                
+                if last_backup_wal_file >= current_wal_file:
+                    self._messenger.warning("No new WAL files since last backup (database unchanged)")
+                    self._logger.info("No changes detected - no new WAL files")
                     
-                return result_value.isoformat() if result_value else "None"
-        except Exception as e:
-            self._logger.error(f"get_max_updated_at failed: {e}")
-            if hasattr(self._connection_provider.get_connection(), 'rollback'):
-                self._connection_provider.get_connection().rollback()
-            return "Error"
-
-    def export_diff_table_zstd(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
-        """Export differential backup using native database utilities with zstd compression"""
-        self._messenger.warning(f"Exporting differential data since {last_backup_time} using '{basis}'")
-
-        outpath = Path(outpath) if isinstance(outpath, str) else outpath
-        diff_root = outpath / ".backup_diff"
-        diff_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        diff_dir = diff_root / diff_timestamp
-
-        if not self._prepare_output_directory(diff_dir):
-            return {}
-
-        manifest_path = diff_root / "manifest.json"
-        manifest_data = {
-            "base_backup": last_backup_time.isoformat(),
-            "diff_chain": [],
-            "last_diff_timestamp": None
-        }
-
-        if manifest_path.exists():
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest_data = json.load(f)
-            except Exception as e:
-                self._logger.warning(f"Failed to read existing manifest, creating new: {e}")
-
-        connection_params = self._connection_provider.get_connection_params()
-        database_name = connection_params["database"]
-        
-        diff_filename = f"{database_name}_diff_{diff_timestamp}.sql.zst"
-        diff_file_path = diff_dir / diff_filename
-        
-        where_conditions = []
-        valid_tables = []
-        
-        for schema, table_name in tables:
-            if not self._schema_exporter._column_exists(schema, table_name, basis):
-                self._messenger.warning(f"Skipping {table_name}: column '{basis}' does not exist")
-                continue
-            valid_tables.append((schema, table_name))
+                    metadata["backup_location"] = str(diff_backup_dir)
+                    metadata["backup_size_bytes"] = 0
+                    metadata["wal_files_count"] = 0
+                    metadata["parent_backup_location"] = str(full_backup_path)
+                    metadata["current_lsn"] = current_lsn
+                    
+                    self._logger.finish_backup(metadata, success=True)
+                    return True
+                
+                cur.execute("SELECT pg_switch_wal();")
+                switch_lsn = cur.fetchone()[0]
+                self._messenger.info(f"Switched WAL to LSN: {switch_lsn}")
             
-        if not valid_tables:
-            self._messenger.warning("No valid tables found for differential backup")
-            return {}
-
-        try:
-            if connection_params.get("port") == 3306:
-                # MySQL differential backup
-                success = self._create_mysql_differential_backup(
-                    valid_tables, last_backup_time, diff_file_path, basis, connection_params
-                )
+            pg_wal_dir = Path(data_dir) / "pg_wal"
+            
+            if not pg_wal_dir.exists():
+                self._messenger.error(f"WAL directory not found: {pg_wal_dir}")
+                self._logger.error(f"pg_wal directory not accessible: {pg_wal_dir}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            wal_files_to_archive = []
+            
+            for wal_file in sorted(pg_wal_dir.glob("0*")):
+                if wal_file.is_file() and wal_file.name > last_backup_wal_file:
+                    if '.' not in wal_file.name or wal_file.suffix == '.partial':
+                        if wal_file.suffix != '.partial':
+                            wal_files_to_archive.append(wal_file)
+            
+            if not wal_files_to_archive:
+                self._messenger.warning("No new WAL files to archive")
+                
+                metadata["backup_location"] = str(diff_backup_dir)
+                metadata["backup_size_bytes"] = 0
+                metadata["wal_files_count"] = 0
+                metadata["parent_backup_location"] = str(full_backup_path)
+                metadata["current_lsn"] = current_lsn
+                
+                # Save metadata
+                metadata_file = diff_backup_dir / "metadata.json"
+                with open(metadata_file, 'w') as f:
+                    json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
+                
+                self._logger.finish_backup(metadata, success=True)
+                return True
+            
+            self._messenger.info(f"Archiving {len(wal_files_to_archive)} WAL files...")
+            
+            compressed_count = 0
+            
+            for wal_file in wal_files_to_archive:
+                dest_file = wal_archive_dir / wal_file.name
+                
+                try:
+                    shutil.copy2(wal_file, dest_file)
+                    
+                    gzip_cmd = ["gzip", str(dest_file)]
+                    subprocess.run(gzip_cmd, check=True, capture_output=True)
+                    compressed_count += 1
+                    
+                except Exception as e:
+                    self._logger.warning(f"Failed to archive {wal_file.name}: {e}")
+            
+            # Calculate total size
+            total_size = sum(f.stat().st_size for f in diff_backup_dir.rglob('*') if f.is_file())
+            
+            self._messenger.success(f"Differential backup created at {diff_backup_dir}")
+            self._messenger.info(f"WAL files archived: {compressed_count}")
+            self._messenger.info(f"Backup size: {total_size / (1024**2):.2f} MB")
+            
+            metadata["backup_location"] = str(diff_backup_dir)
+            metadata["backup_size_bytes"] = total_size
+            metadata["wal_files_count"] = compressed_count
+            metadata["current_lsn"] = current_lsn
+            metadata["current_wal_file"] = current_wal_file
+            metadata["parent_backup_location"] = str(full_backup_path)
+            metadata["last_backup_wal_file"] = last_backup_wal_file
+            
+            # Save metadata.json
+            metadata_file = diff_backup_dir / "metadata.json"
+            with open(metadata_file, 'w') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
+            self._messenger.info(f"Metadata saved: {metadata_file}")
+            
+            # Update chain.json
+            chain_file = differentials_dir / "chain.json"
+            if chain_file.exists():
+                with open(chain_file, 'r') as f:
+                    chain_data = json.load(f)
             else:
-                # PostgreSQL differential backup  
-                success = self._create_postgres_differential_backup(
-                    valid_tables, last_backup_time, diff_file_path, basis, connection_params
-                )
-
-            if success:
-                file_size = diff_file_path.stat().st_size
-                self._messenger.success(f"Differential backup created: {diff_file_path}")
-                self._logger.info(f"Differential backup file: {diff_file_path} ({file_size/1024:.2f} KB)")
-                
-                # Update manifest
-                manifest_data["diff_chain"].append(diff_timestamp)
-                manifest_data["last_diff_timestamp"] = diff_timestamp
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump(manifest_data, f, indent=4, ensure_ascii=False)
-                oschmod.set_mode(manifest_path, "600")
-                
-                return {
-                    "differential_backup": {
-                        "file_path": str(diff_file_path),
-                        "file_size": file_size,
-                        "tables_count": len(valid_tables),
-                        "timestamp": diff_timestamp
-                    }
+                chain_data = {
+                    "full_backup_id": full_backup_path.name,
+                    "full_backup_time": last_full_timestamp.isoformat() if hasattr(last_full_timestamp, 'isoformat') else str(last_full_timestamp),
+                    "differentials": []
                 }
-            else:
-                return {}
-                
+            
+            chain_data["differentials"].append({
+                "id": diff_backup_dir.name,
+                "timestamp": metadata["timestamp_start"],
+                "wal_files_count": compressed_count,
+                "size_bytes": total_size,
+                "current_lsn": current_lsn
+            })
+            
+            with open(chain_file, 'w') as f:
+                json.dump(chain_data, f, indent=2, ensure_ascii=False)
+            self._messenger.info(f"Chain updated: {chain_file}")
+            
+            self._logger.finish_backup(metadata, success=True)
+            return True
+        
+        except PermissionError as e:
+            self._messenger.error(f"Permission denied accessing WAL directory: {e}")
+            self._messenger.warning("Try running with user that has access to PostgreSQL data directory")
+            self._logger.error(f"Permission denied: {e}")
+            self._logger.finish_backup(metadata, success=False)
+            return False
         except Exception as e:
             self._messenger.error(f"Differential backup failed: {e}")
             self._logger.error(f"Differential backup failed: {e}")
-            return {}
-
-    def _create_postgres_differential_backup(self, tables, last_backup_time, output_file, basis, connection_params):
-        """Create PostgreSQL differential backup using pg_dump with WHERE conditions"""
+            import traceback
+            self._logger.error(traceback.format_exc())
+            self._logger.finish_backup(metadata, success=False)
+            return False
+    
+    def _perform_mysql_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
+        """Creates a differential MySQL backup using xtrabackup"""
+        self._messenger.warning("Starting MySQL differential backup with xtrabackup...")
         
-        try:
-            # Use pg_dump with data-only and table filters
-            pg_dump_cmd = [
-                "pg_dump",
-                "-h", connection_params["host"],
-                "-p", str(connection_params["port"]),
-                "-U", connection_params["user"],
-                "-d", connection_params["database"],
-                "--data-only",
-                "-Fc"  # Custom format for better compression
-            ]
-            
-            # Add table specifications for differential data
-            for schema, table_name in tables:
-                pg_dump_cmd.extend(["-t", f"{schema}.{table_name}"])
-            
-            zstd_cmd = [
-                "zstd",
-                "-o", str(output_file),
-                "-"
-            ]
-            
-            env = os.environ.copy()
-            env['PGPASSWORD'] = connection_params["password"]
-            
-            pg_dump_process = subprocess.Popen(
-                pg_dump_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=env
-            )
-
-            zstd_process = subprocess.Popen(
-                zstd_cmd,
-                stdin=pg_dump_process.stdout,
-                stderr=subprocess.PIPE
-            )
-            
-            pg_dump_process.stdout.close()
-            pg_dump_process.wait()
-            zstd_process.wait()
-            
-            if pg_dump_process.returncode == 0 and zstd_process.returncode == 0:
-                return True
-            else:
-                _, pg_stderr = pg_dump_process.communicate() if pg_dump_process.returncode != 0 else (None, None)
-                _, zstd_stderr = zstd_process.communicate() if zstd_process.returncode != 0 else (None, None)
-                
-                if pg_stderr:
-                    self._logger.error(f"pg_dump failed: {pg_stderr.decode()}")
-                if zstd_stderr:
-                    self._logger.error(f"zstd failed: {zstd_stderr.decode()}")
-                    
-                return False
-                
-        except Exception as e:
-            self._logger.error(f"PostgreSQL differential backup failed: {e}")
-            return False
-
-    def _create_mysql_differential_backup(self, tables, last_backup_time, output_file, basis, connection_params):
-        """Create MySQL differential backup using mysqldump with WHERE conditions"""
-        
-        try:
-            
-            mysqldump_cmd = [
-                "mysqldump",
-                "--host", connection_params["host"],
-                "--port", str(connection_params["port"]),
-                "--user", connection_params["user"],
-                f"--password={connection_params['password']}",
-                "--single-transaction",
-                "--no-create-info",  # data only
-                connection_params["database"]
-            ]
-            
-            table_names = [table_name for _, table_name in tables]
-            mysqldump_cmd.extend(table_names)
-            
-            where_clause = f"--where={basis} > '{last_backup_time.isoformat()}'"
-            mysqldump_cmd.append(where_clause)
-            
-            zstd_cmd = [
-                "zstd",
-                "-o", str(output_file),
-                "-"
-            ]
-            
-            mysqldump_process = subprocess.Popen(
-                mysqldump_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
-            zstd_process = subprocess.Popen(
-                zstd_cmd,
-                stdin=mysqldump_process.stdout,
-                stderr=subprocess.PIPE
-            )
-            
-            mysqldump_process.stdout.close()
-            mysqldump_process.wait()
-            zstd_process.wait()
-            
-            if mysqldump_process.returncode == 0 and zstd_process.returncode == 0:
-                return True
-            else:
-                self._logger.error("mysqldump or zstd failed in differential backup")
-                return False
-                
-        except Exception as e:
-            self._logger.error(f"MySQL differential backup failed: {e}")
-            return False
-
-    def export_diff_table(self, tables, last_backup_time: datetime, outpath: Path, basis: str) -> dict:
-        """Wrapper method to maintain compatibility - now uses zstd"""
-        return self.export_diff_table_zstd(tables, last_backup_time, outpath, basis)
-
-    def _prepare_output_directory(self, outpath: Path) -> bool:
-        try:
-            outpath.mkdir(parents=True, exist_ok=True)
-            return True
-        except Exception as e:
-            self._messenger.error(f"Failed to create {outpath}: {e}")
-            self._logger.error(f"Dir creation failed: {e}")
-            return False
-
-    def perform_differential_backup(self, basis: str, metadata_reader, tables: list = None):
-        self._messenger.warning("Starting differential backup...")
-
-        last_full_timestamp = metadata_reader.get_last_full_backup_timestamp()
-        backup_location = metadata_reader.get_output_path_from_last_full_backup()
-
-        if not last_full_timestamp or not backup_location:
-            self._messenger.error("No previous full backup found. Cannot perform differential backup.")
-            return False
-
-        if not tables:
-            tables = metadata_reader.get_table_names_from_last_full_backup()
-            
-            if not tables:
-                self._messenger.info("No tables found in backup metadata, fetching from database...")
-                tables = self._table_exporter.get_tables()
-                if not tables:
-                    self._messenger.error("No tables found in database.")
-                    return False
-                if tables and isinstance(tables[0], tuple):
-                    tables = [table[1] for table in tables]  
-            
-            connection_params = self._connection_provider.get_connection_params()
-            if connection_params.get("port") == 3306:
-                tables = [(connection_params["database"], t) for t in tables]
-            else:
-                tables = [("public", t) for t in tables]
-
-        self._messenger.info(f"Using basis column: {basis}")
-        self._messenger.info(f"Tables: {[t[1] for t in tables]}")
-
-        result = self.export_diff_table(
-            tables=tables,
-            last_backup_time=last_full_timestamp,
-            outpath=backup_location,
-            basis=basis
+        metadata = self._logger.start_backup(
+            backup_type="incremental",
+            database=self._connection_provider.get_connection_params()["database"],
+            database_version="Physical",
+            utility_version="xtrabackup",
+            compress=True
         )
-
-        if result:
-            self._messenger.success("Differential backup completed successfully.")
+        
+        timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
+        
+        last_full_backup_location = metadata_reader.get_output_path_from_last_full_backup()
+        
+        if not last_full_backup_location:
+            self._messenger.error("No previous full backup found. Cannot perform incremental backup.")
+            self._logger.finish_backup(metadata, success=False)
+            return False
+        
+        base_path = Path(last_full_backup_location).parent
+        backup_id = metadata["id"]
+        backup_dir = base_path / backup_id
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        
+        connection_params = self._connection_provider.get_connection_params()
+        
+        xtrabackup_cmd = [
+            "xtrabackup",
+            "--backup",
+            f"--target-dir={backup_dir}",
+            f"--incremental-basedir={last_full_backup_location}",
+            f"--user={connection_params['user']}",
+            f"--password={connection_params['password']}",
+            f"--host={connection_params['host']}",
+            f"--port={connection_params['port']}",
+            "--compress",
+            "--compress-threads=4"
+        ]
+        
+        try:
+            self._messenger.info(f"Running xtrabackup incremental from: {last_full_backup_location}")
+            
+            process = subprocess.run(
+                xtrabackup_cmd,
+                capture_output=True,
+                check=False,
+                text=True
+            )
+            
+            if process.returncode != 0:
+                error_msg = process.stderr or "Unknown error"
+                self._messenger.error(f"xtrabackup incremental failed: {error_msg}")
+                self._logger.error(f"xtrabackup incremental failed: {error_msg}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            checkpoints_file = backup_dir / "xtrabackup_checkpoints"
+            if not checkpoints_file.exists():
+                self._messenger.error("xtrabackup_checkpoints not found - backup may be incomplete")
+                self._logger.error("xtrabackup_checkpoints file not found")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            total_size = sum(f.stat().st_size for f in backup_dir.rglob('*') if f.is_file())
+            
+            self._messenger.success(f"MySQL incremental backup created at {backup_dir}")
+            self._messenger.info(f"Backup size: {total_size / (1024**2):.2f} MB")
+            
+            metadata["backup_location"] = str(backup_dir)
+            metadata["backup_size_bytes"] = total_size
+            metadata["backup_checkpoints_path"] = str(checkpoints_file)
+            metadata["parent_backup_location"] = last_full_backup_location
+            
+            self._logger.finish_backup(metadata, success=True)
             return True
-        else:
-            self._messenger.error("Differential backup failed or no changes.")
+        
+        except Exception as e:
+            self._messenger.error(f"MySQL incremental backup failed: {e}")
+            self._logger.error(f"MySQL incremental backup failed: {e}")
+            self._logger.finish_backup(metadata, success=False)
             return False

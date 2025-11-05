@@ -1,27 +1,22 @@
-import csv
+import os
 from pathlib import Path
 from datetime import datetime
 from factory import DatabaseClient
 from mixins.backup_catalog_mixin import BackupCatalogMixin
 from mixins.conection_config_mixin import ConnectionConfigMixin
-from services.clients_mixin import fetch_version_database
+from mixins.differential_mixin import DifferentialBackupMixin
 from services.interfaces import IConnectionProvider
 import pymysql.cursors
 from pymysql import err
 from pymysql.connections import Connection
-from mixins.facade_mixin import ServiceFacadeMixin
-from mixins.orchestration_mixin import BackupOrchestrationMixin
-from mixins.differential_mixin import DifferentialBackupMixin
 from typing import Optional, List
 import subprocess
 
 class MysqlClient(ConnectionConfigMixin,
-                     BackupCatalogMixin,
-                     BackupOrchestrationMixin,
-                     DifferentialBackupMixin,
-                     ServiceFacadeMixin,
-                     DatabaseClient,
-                     IConnectionProvider):
+                  BackupCatalogMixin,
+                  DifferentialBackupMixin,
+                  DatabaseClient,
+                  IConnectionProvider):
 
     def __init__(self, host, database, user, password, **kwargs):
         if 'port' not in kwargs:
@@ -35,11 +30,9 @@ class MysqlClient(ConnectionConfigMixin,
 
     @property
     def is_connected(self):
-        """Check if MySQL connection is active"""
         if self._connection is None:
             return False
         try:
-            # MySQL check the connection
             self._connection.ping(reconnect=False)
             return True
         except Exception:
@@ -52,13 +45,13 @@ class MysqlClient(ConnectionConfigMixin,
         try:
             self._messenger.info("Attempting MySQL connection...")
             self._connection = pymysql.connect(
-                host= self._host,
-                database= self._database,
-                user= self._user,
-                password= self._password,
-                port= self._port,
+                host=self._host,
+                database=self._database,
+                user=self._user,
+                password=self._password,
+                port=self._port,
                 cursorclass=pymysql.cursors.DictCursor,
-                connect_timeout=10  
+                connect_timeout=10
             )
             
             with self._connection.cursor() as cur:
@@ -77,10 +70,6 @@ class MysqlClient(ConnectionConfigMixin,
             self._messenger.warning("Check your .env/CLI settings.")
             self._logger.error(f"Connection failed: {e}")
             return None
-        except Exception as e:
-            self._messenger.error(f"Unexpected connection error: {e}")
-            self._logger.error(f"Connection failed: {e}")
-            return None
 
     def disconnect(self):
         try:
@@ -89,31 +78,9 @@ class MysqlClient(ConnectionConfigMixin,
                 self._connection = None
                 self._messenger.info("Disconnected from database.")
                 self._logger.info("Database connection closed")
-
-            return None
         except err.OperationalError as e:
             self._messenger.error(f"Error on disconnect: {e}")
             self._logger.error(f"Disconnect failed: {e}")
-            return None
-
-    def _execute(self, query):
-        cur = self._connection.cursor()
-        cur.execute(query)
-        return cur
-
-    def fetch_all(self, query):
-        cur = self._execute(query)
-        return cur.fetchall()
-
-    def fetch_one(self, query):
-        cur = self._execute(query)
-        return cur.fetchone()
-
-    def commit(self):
-        return self._connection.commit()
-
-    def rollback(self):
-        return self._connection.rollback()
 
     def validate_connection(self):
         try:
@@ -122,7 +89,7 @@ class MysqlClient(ConnectionConfigMixin,
             with self._connection.cursor() as cur:
                 cur.execute("SELECT 1 as test;")
                 result = cur.fetchone()
-                return result["test"] == 1  # MySQL returns dict cursor
+                return result["test"] == 1
         except Exception:
             return False
 
@@ -131,89 +98,72 @@ class MysqlClient(ConnectionConfigMixin,
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
 
-    def get_database_size(self) -> str:
-        from services.backup.exporters import SchemaExporter
-        schema_exporter = SchemaExporter(self, self._logger, self._messenger)
-        return schema_exporter.get_database_size()
-
     def backup_full(self, outpath: str) -> bool:
-        """Creates a full MySQL backup using mysqldump, compressing it with Zstd"""
+        """Creates a full MySQL backup using xtrabackup (Percona XtraBackup)"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
-        self._messenger.info(f"Starting full MySQL backup → {base_path}")
+        self._messenger.info(f"Starting full MySQL backup with xtrabackup → {base_path}")
         
         metadata = self._logger.start_backup(
             backup_type="full",
             database=self._database,
             database_version=self._database_version or "Unknown",
-            utility_version=self._utility_version,
-            compress=True 
+            utility_version="xtrabackup",
+            compress=True
         )
         
         timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
+        backup_id = metadata["id"]
         
-        backup_structure = self._create_backup_structure(
-            base_path, 
-            metadata["id"],
-            back_up_time=metadata["timestamp_start"]  # Pass ISO string
-        )
+        backup_dir = base_path / backup_id
+        backup_dir.mkdir(parents=True, exist_ok=True)
         
-        backup_filename = f"{self._database}_{timestamp_start.strftime('%Y%m%d_%H%M%S')}.sql.zst"
-        backup_file_path = backup_structure["backup_root"] / backup_filename
-        
-        # MySQL dump command
-        mysqldump_cmd = [
-            "mysqldump",
-            "--host", self._host,
-            "--port", str(self._port),
-            "--user", self._user,
+        xtrabackup_cmd = [
+            "xtrabackup",
+            "--backup",
+            f"--target-dir={backup_dir}",
+            f"--user={self._user}",
             f"--password={self._password}",
-            "--single-transaction",
-            "--routines",
-            "--triggers",
-            self._database
-        ]
-    
-        zstd_cmd = [
-            "zstd",
-            "-o", str(backup_file_path),
-            "-"
+            f"--host={self._host}",
+            f"--port={self._port}",
+            "--compress",
+            "--compress-threads=4"
         ]
         
         try:
-            mysqldump_process = subprocess.Popen(
-                mysqldump_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-
-            zstd_process = subprocess.Popen(
-                zstd_cmd,
-                stdin=mysqldump_process.stdout,
-                stderr=subprocess.PIPE
+            self._messenger.info("Running xtrabackup... (this may take a while)")
+            
+            process = subprocess.run(
+                xtrabackup_cmd,
+                capture_output=True,
+                check=False,
+                text=True
             )
             
-            mysqldump_process.stdout.close()
-            
-            mysqldump_process.wait()
-            zstd_process.wait()
-            
-            if mysqldump_process.returncode != 0:
-                _, mysqldump_stderr = mysqldump_process.communicate()
-                self._messenger.error(f"mysqldump failed: {mysqldump_stderr.decode()}")
-                self._logger.error(f"mysqldump failed: {mysqldump_stderr.decode()}")
-                self._logger.finish_backup(metadata, success=False)
-                return False
-                
-            if zstd_process.returncode != 0:
-                _, zstd_stderr = zstd_process.communicate()
-                self._messenger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
-                self._logger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
+            if process.returncode != 0:
+                error_msg = process.stderr or "Unknown error"
+                self._messenger.error(f"xtrabackup failed: {error_msg}")
+                self._logger.error(f"xtrabackup failed: {error_msg}")
                 self._logger.finish_backup(metadata, success=False)
                 return False
             
-            self._messenger.success(f"Full MySQL backup created at {backup_file_path}")
-            self._logger.info(f"Full backup file: {backup_file_path}")
-            metadata["backup_location"] = str(backup_structure["backup_root"]) 
+            checkpoints_file = backup_dir / "xtrabackup_checkpoints"
+            if not checkpoints_file.exists():
+                self._messenger.error("xtrabackup_checkpoints not found - backup may be incomplete")
+                self._logger.error("xtrabackup_checkpoints file not found")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+            
+            total_size = sum(f.stat().st_size for f in backup_dir.rglob('*') if f.is_file())
+            
+            self._messenger.success(f"Full MySQL backup created at {backup_dir}")
+            self._messenger.info(f"Backup size: {total_size / (1024**2):.2f} MB")
+            self._logger.info(f"Full backup directory: {backup_dir}")
+            self._logger.info(f"Backup size: {total_size} bytes")
+            
+            metadata["backup_location"] = str(backup_dir)
+            metadata["backup_size_bytes"] = total_size
+            metadata["backup_checkpoints_path"] = str(checkpoints_file)
+            
             self._logger.finish_backup(metadata, success=True)
             return True
         
@@ -223,100 +173,5 @@ class MysqlClient(ConnectionConfigMixin,
             self._logger.finish_backup(metadata, success=False)
             return False
 
-    def partial_backup(self, tables: List[str], outpath: str, backup_type: str = "partial") -> bool:
-        """Creates a partial MySQL backup for specified tables, compressing it with Zstd"""
-        
-        if not tables:
-            self._messenger.error("No tables specified for partial backup")
-            return False
-            
-        base_path = Path(outpath) if isinstance(outpath, str) else outpath
-        tables_str = ", ".join(tables)
-        self._messenger.info(f"Starting partial MySQL backup of tables [{tables_str}] → {base_path}")
-        
-        metadata = self._logger.start_backup(
-            backup_type=backup_type,
-            database=self._database,
-            database_version=self._database_version or "Unknown",
-            utility_version=self._utility_version,
-            compress=True 
-        )
-        
-        timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
-        
-        backup_structure = self._create_backup_structure(
-            base_path, 
-            metadata["id"],
-            back_up_time=metadata["timestamp_start"] 
-        )
-        
-        backup_filename = f"{self._database}_partial_{timestamp_start.strftime('%Y%m%d_%H%M%S')}.sql.zst"
-        backup_file_path = backup_structure["backup_root"] / backup_filename
-        
-        mysqldump_cmd = [
-            "mysqldump",
-            "--host", self._host,
-            "--port", str(self._port),
-            "--user", self._user,
-            f"--password={self._password}",
-            "--single-transaction",
-            "--routines",
-            "--triggers",
-            self._database
-        ]
-        
-        mysqldump_cmd.extend(tables)
-        
-        zstd_cmd = [
-            "zstd",
-            "-o", str(backup_file_path),
-            "-"
-        ]
-        
-        try:
-            mysqldump_process = subprocess.Popen(
-                mysqldump_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
 
-            zstd_process = subprocess.Popen(
-                zstd_cmd,
-                stdin=mysqldump_process.stdout,
-                stderr=subprocess.PIPE
-            )
-            
-            mysqldump_process.stdout.close()
-            
-            mysqldump_process.wait()
-            zstd_process.wait()
-            
-            if mysqldump_process.returncode != 0:
-                _, mysqldump_stderr = mysqldump_process.communicate()
-                self._messenger.error(f"mysqldump failed: {mysqldump_stderr.decode()}")
-                self._logger.error(f"mysqldump failed: {mysqldump_stderr.decode()}")
-                self._logger.finish_backup(metadata, success=False)
-                return False
-                
-            if zstd_process.returncode != 0:
-                _, zstd_stderr = zstd_process.communicate()
-                self._messenger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
-                self._logger.error(f"Backup failed during compression: {zstd_stderr.decode()}")
-                self._logger.finish_backup(metadata, success=False)
-                return False
-            
-            self._messenger.success(f"Partial MySQL backup created at {backup_file_path}")
-            self._messenger.info(f"Backed up tables: {tables_str}")
-            self._logger.info(f"Partial backup file: {backup_file_path}")
-            self._logger.info(f"Tables included: {tables_str}")
-            metadata["backup_location"] = str(backup_structure["backup_root"])  # Save directory
-            metadata["tables"] = tables
-            self._logger.finish_backup(metadata, success=True)
-            return True
-        
-        except Exception as e:
-            self._messenger.error(f"Partial MySQL backup failed: {e}")
-            self._logger.error(f"Partial MySQL backup failed: {e}")
-            self._logger.finish_backup(metadata, success=False)
-            return False
 

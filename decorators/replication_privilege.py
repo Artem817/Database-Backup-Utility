@@ -34,3 +34,34 @@ def requires_replication_privilege(func):
             return None
     
     return wrapper
+
+def _check_wal_level(func):
+    """Decorator to check if wal_level is set to 'replica' or higher."""
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        query = "SHOW wal_level;"
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(query)
+                result = cursor.fetchone()
+                
+                if result and result[0] in ('replica', 'logical', 'archive'):
+                    self._messenger.success(f"wal_level is set to '{result[0]}'.")
+                    self._logger.info(f"wal_level check passed: '{result[0]}'.")
+                    return func(self, *args, **kwargs)
+                else:
+                    self._messenger.error(
+                        f"wal_level is set to '{result[0]}'. It must be 'replica' or higher for replication."
+                        "\nINSTRUCTION: Set wal_level to 'replica' or higher in postgresql.conf and restart the server."
+                    )
+                    self._logger.error(f"wal_level check failed: '{result[0]}'.")
+                    return None
+
+        except Exception as e:
+            self._messenger.error(f"Failed to check wal_level: {e}")
+            self._logger.error(f"Failed to check wal_level: {e}")
+            return None
+    
+    return wrapper  
+    
