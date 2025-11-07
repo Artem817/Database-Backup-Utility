@@ -237,7 +237,7 @@ class DifferentialBackupService:
         self._messenger.warning("Starting MySQL differential backup with xtrabackup...")
         
         metadata = self._logger.start_backup(
-            backup_type="incremental",
+            backup_type="differential",
             database=self._connection_provider.get_connection_params()["database"],
             database_version="Physical",
             utility_version="xtrabackup",
@@ -260,18 +260,40 @@ class DifferentialBackupService:
         
         connection_params = self._connection_provider.get_connection_params()
         
-        xtrabackup_cmd = [
-            "xtrabackup",
-            "--backup",
-            f"--target-dir={backup_dir}",
-            f"--incremental-basedir={last_full_backup_location}",
-            f"--user={connection_params['user']}",
-            f"--password={connection_params['password']}",
-            f"--host={connection_params['host']}",
-            f"--port={connection_params['port']}",
-            "--compress",
-            "--compress-threads=4"
-        ]
+        login_path = connection_params.get('login_path')
+        socket = connection_params.get('socket')
+        
+        if login_path:
+            xtrabackup_cmd = [
+                "xtrabackup",
+                "--backup",
+                f"--target-dir={backup_dir}",
+                f"--incremental-basedir={last_full_backup_location}",
+                f"--login-path={login_path}",
+                "--compress",
+                "--compress-threads=4"
+            ]
+            
+            if socket:
+                xtrabackup_cmd.append(f"--socket={socket}")
+            
+            env = os.environ.copy()
+            self._messenger.info(f"Using login-path '{login_path}' for xtrabackup authentication")
+        else:
+            xtrabackup_cmd = [
+                "xtrabackup",
+                "--backup",
+                f"--target-dir={backup_dir}",
+                f"--incremental-basedir={last_full_backup_location}",
+                f"--user={connection_params['user']}",
+                f"--host={connection_params['host']}",
+                f"--port={connection_params['port']}",
+                "--compress",
+                "--compress-threads=4"
+            ]
+            
+            env = os.environ.copy()
+            env['MYSQL_PWD'] = connection_params['password']
         
         try:
             self._messenger.info(f"Running xtrabackup incremental from: {last_full_backup_location}")
@@ -280,7 +302,8 @@ class DifferentialBackupService:
                 xtrabackup_cmd,
                 capture_output=True,
                 check=False,
-                text=True
+                text=True,
+                env=env
             )
             
             if process.returncode != 0:

@@ -20,11 +20,24 @@ class ConnectionConfigMixin:
     @property
     def database_name(self):
         return self._database
-
     @property
     def connection_params(self):
-        return {"host": self._host, "user": self._user, "database": self._database, "port": self._port,
-                "password": self._password}
+        """Return connection parameters for backup utilities"""
+        params = {
+            'host': self._host,
+            'port': self._port,
+            'user': self._user,
+            'password': self._password,
+            'database': self._database
+        }
+        
+        if self._login_path:
+            params['login_path'] = self._login_path
+        
+        if self._socket:
+            params['socket'] = self._socket
+        
+        return params
 
     def get_connection_params(self):
         return self.connection_params

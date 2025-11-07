@@ -64,8 +64,8 @@ parser.add_argument(
 parser.add_argument(
     "--config", 
     required=True, 
-    choices=["manual", "file"], 
-    help="Configuration source: 'manual' for CLI args or 'file' for .env"
+    choices=["manual", "file", "profile"], 
+    help="Configuration source: 'manual' for CLI args, 'file' for .env, 'profile' for encrypted login-path"
 )
 
 parser.add_argument("--host", help="Database host address")
@@ -80,50 +80,110 @@ messenger = get_messenger()
 
 try:
     config = validate_config(args, parser)
-    host = config['host']
-    port = config['port']
-    user = config['user']
-    password = config['password']
-    dbname = config['dbname']
-
-    if not port:
-        port = "5432" if args.db == "postgres" else "3306"
-
-    if args.storage == "cloud":
-        messenger.warning("Cloud storage is not yet implemented. Use --storage local instead.")
-        sys.exit(EXIT_FAILURE)
-        
-    messenger.section_header("Configuration")
-    messenger.config_item("Database Type", args.db)
-    messenger.config_item("Host", host)
-    messenger.config_item("Port", port)
-    messenger.config_item("User", user)
-    messenger.config_item("Database", dbname)
-    messenger.config_item("Password", password, mask_value=True)
-    messenger.config_item("Storage", args.storage)
-    messenger.info("")
-
-    messenger.info("Initializing database client...")
     
-    if args.db == "postgres":
+    # Handle profile-based configuration
+    config_type = config.get('type')
+    
+    # Initialize variables that will be used later
+    user = None
+    dbname = config.get('dbname', args.database)
+    
+    if config_type == 'mysql_profile':
+        # MySQL login-path configuration
+        login_path = config['login_path']
+        host = config.get('host')
+        port = config.get('port')
+        user = config.get('user') or 'root'  # Default user for display
+        
+        messenger.section_header("Configuration (MySQL Login-Path)")
+        messenger.config_item("Database Type", "MySQL")
+        messenger.config_item("Login-Path", login_path)
+        messenger.config_item("Database", dbname)
+        if host:
+            messenger.config_item("Host Override", host)
+        if port:
+            messenger.config_item("Port Override", port)
+        if config.get('socket'):
+            messenger.config_item("Socket", config['socket'])
+        messenger.info("")
+        
+        messenger.info("Initializing MySQL client with login-path...")
+        db_client = MysqlClient(
+            host=host or 'localhost',
+            database=dbname,
+            user='',  # Will be read from login-path
+            password='',  # Will be read from login-path
+            port=int(port) if port else 3306,
+            login_path=login_path,
+            socket=config.get('socket')
+        )
+        
+    elif config_type == 'postgres_profile':
+        # PostgreSQL .pgpass configuration
+        host = config['host']
+        port = config['port']
+        user = config['user']
+        
+        messenger.section_header("Configuration (PostgreSQL .pgpass)")
+        messenger.config_item("Database Type", "PostgreSQL")
+        messenger.config_item("Host", host)
+        messenger.config_item("Port", port)
+        messenger.config_item("User", user)
+        messenger.config_item("Database", dbname)
+        messenger.config_item("Password Source", "~/.pgpass")
+        messenger.info("")
+        
+        messenger.info("Initializing PostgreSQL client with .pgpass...")
         db_client = PostgresClient(
             host=host,
             database=dbname,
             user=user,
-            password=password,
-            port=int(port)
+            password='',  # Will be read from .pgpass by psycopg2
+            port=int(port),
+            use_pgpass=True
         )
-    elif args.db == "mysql":
-        db_client = MysqlClient(
-            host=host,
-            database=dbname,
-            user=user,
-            password=password,
-            port=int(port)
-        )
+        
     else:
-        messenger.error(f"Unsupported database type: {args.db}")
-        sys.exit(EXIT_FAILURE)
+        # Traditional configuration (manual or file)
+        host = config['host']
+        port = config['port']
+        user = config['user']
+        password = config['password']
+
+        if not port:
+            port = "5432" if args.db == "postgres" else "3306"
+
+        messenger.section_header("Configuration")
+        messenger.config_item("Database Type", args.db)
+        messenger.config_item("Host", host)
+        messenger.config_item("Port", port)
+        messenger.config_item("User", user)
+        messenger.config_item("Database", dbname)
+        messenger.config_item("Password", password, mask_value=True)
+        messenger.config_item("Storage", args.storage)
+        messenger.info("")
+
+        messenger.info("Initializing database client...")
+        
+        if args.db == "postgres":
+            db_client = PostgresClient(
+                host=host,
+                database=dbname,
+                user=user,
+                password=password,
+                port=int(port)
+            )
+        elif args.db == "mysql":
+            db_client = MysqlClient(
+                host=host,
+                database=dbname,
+                user=user,
+                password=password,
+                port=int(port)
+            )
+        else:
+            messenger.error(f"Unsupported database type: {args.db}")
+            sys.exit(EXIT_FAILURE)
     
     configure_messenger(logger=db_client._logger.logger, enable_colors=True)
     messenger = get_messenger() 

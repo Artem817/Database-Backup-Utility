@@ -25,6 +25,10 @@ class PostgresClient(ConnectionConfigMixin,
     def __init__(self, host: str, database: str, user: str, password: str, **kwargs: Any) -> None:
         if 'port' not in kwargs:
             kwargs['port'] = 5432
+        
+        # Support for PostgreSQL .pgpass
+        self._use_pgpass = kwargs.pop('use_pgpass', False)
+        
         super().__init__(host, database, user, password, **kwargs)
         self._connection: Optional[connection] = None
 
@@ -164,7 +168,16 @@ class PostgresClient(ConnectionConfigMixin,
             pg_basebackup_cmd.extend(["-z", "-Z", "6"])
         
         env = os.environ.copy()
-        env['PGPASSWORD'] = self._password
+        
+        # Use .pgpass if configured, otherwise use PGPASSWORD
+        if self._use_pgpass:
+            # Remove PGPASSWORD to force use of .pgpass
+            env.pop('PGPASSWORD', None)
+            self._messenger.info("Using PostgreSQL .pgpass for authentication")
+            metadata["auth_method"] = "pgpass"
+        else:
+            env['PGPASSWORD'] = self._password
+            metadata["auth_method"] = "password"
         
         try:
             self._messenger.info("Running pg_basebackup... (this may take a while)")
