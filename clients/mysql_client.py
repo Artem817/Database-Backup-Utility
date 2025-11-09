@@ -14,6 +14,7 @@ from pymysql import err
 from pymysql.connections import Connection
 from typing import Optional, List
 import subprocess
+from services.backup.archive_utils import create_single_archive
 
 
 class MysqlClient(ConnectionConfigMixin,
@@ -26,11 +27,14 @@ class MysqlClient(ConnectionConfigMixin,
         if 'port' not in kwargs:
             kwargs['port'] = 3306
         
-        self._login_path = kwargs.pop('login_path', None)
-        self._socket = kwargs.pop('socket', None)
+        login_path = kwargs.pop('login_path', None)
+        socket = kwargs.pop('socket', None)
         
         super().__init__(host, database, user, password, **kwargs)
         self._connection: Optional[Connection] = None
+        
+        self._login_path = login_path
+        self._socket = socket
         
         if self._login_path:
             self._extract_login_path_config()
@@ -174,8 +178,8 @@ class MysqlClient(ConnectionConfigMixin,
         return query_executor.execute_query(query)
         
     @check_utility_available("xtrabackup")
-    def backup_full(self, outpath: str) -> bool:
-        """Creates a full MySQL backup using xtrabackup (Percona XtraBackup)"""
+    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
+        """Create full database backup with zstd compression"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full MySQL backup with xtrabackup → {base_path}")
         
@@ -265,6 +269,17 @@ class MysqlClient(ConnectionConfigMixin,
                     binlog_info = f.read().strip()
                     metadata["binlog_info"] = binlog_info
                     self._logger.info(f"Binlog info: {binlog_info}")
+            
+            if single_archive:
+                self._messenger.section_header("Creating Single Archive (zstd)")
+                archive_path = create_single_archive(backup_dir, self._logger, self._messenger)
+                if archive_path:
+                    metadata["archive_path"] = str(archive_path)
+                    metadata["archive_format"] = "tar+zstd"
+                    metadata["archive_size_bytes"] = archive_path.stat().st_size
+                    self._messenger.success(f"✓ Single archive ready: {archive_path.name}")
+                else:
+                    self._messenger.warning("Single archive creation skipped/failed - backup remains as directory")
             
             self._logger.finish_backup(metadata, success=True)
             return True

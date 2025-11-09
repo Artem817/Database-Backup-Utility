@@ -73,6 +73,13 @@ parser.add_argument("--port", help="Database port (default: 5432 for postgres)")
 parser.add_argument("--user", help="Database username")
 parser.add_argument("--password", help="Database password")
 
+parser.add_argument(
+    "--single-archive",
+    type=lambda x: x.lower() in ['true', 't', 'yes', 'y', '1'],
+    default=True,
+    help="Compress entire backup into single .tar.zst archive (default: True, faster for AWS S3)"
+)
+
 args = parser.parse_args()
 
 db_client = None
@@ -81,10 +88,8 @@ messenger = get_messenger()
 try:
     config = validate_config(args, parser)
     
-    # Handle profile-based configuration
     config_type = config.get('type')
     
-    # Initialize variables that will be used later
     user = None
     dbname = config.get('dbname', args.database)
     
@@ -93,7 +98,7 @@ try:
         login_path = config['login_path']
         host = config.get('host')
         port = config.get('port')
-        user = config.get('user') or 'root'  # Default user for display
+        user = config.get('user') or 'root' 
         
         messenger.section_header("Configuration (MySQL Login-Path)")
         messenger.config_item("Database Type", "MySQL")
@@ -112,14 +117,13 @@ try:
             host=host or 'localhost',
             database=dbname,
             user='',  # Will be read from login-path
-            password='',  # Will be read from login-path
+            password='',  
             port=int(port) if port else 3306,
             login_path=login_path,
             socket=config.get('socket')
         )
         
     elif config_type == 'postgres_profile':
-        # PostgreSQL .pgpass configuration
         host = config['host']
         port = config['port']
         user = config['user']
@@ -144,7 +148,6 @@ try:
         )
         
     else:
-        # Traditional configuration (manual or file)
         host = config['host']
         port = config['port']
         user = config['user']

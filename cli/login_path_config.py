@@ -39,7 +39,6 @@ class MySQLLoginPathManager:
             if result.returncode != 0:
                 return False
             
-            # Check if the login-path section exists
             return f"[{login_path}]" in result.stdout
         except Exception as e:
             self._messenger.error(f"Failed to validate login-path: {e}")
@@ -141,7 +140,6 @@ class PostgreSQLPgPassManager:
                     
                     p_host, p_port, p_db, p_user, _ = parts
                     
-                    # Match with wildcards
                     if (p_host in [host, '*'] and
                         p_port in [str(port), '*'] and
                         p_db in [database, '*'] and

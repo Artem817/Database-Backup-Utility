@@ -15,6 +15,7 @@ import subprocess
 from decorators.replication_privilege import requires_replication_privilege, _check_wal_level
 from decorators.check_basebackup_decorator import check_basebackup
 import json
+from services.backup.archive_utils import create_single_archive
 
 class PostgresClient(ConnectionConfigMixin,
                      BackupCatalogMixin,
@@ -26,7 +27,6 @@ class PostgresClient(ConnectionConfigMixin,
         if 'port' not in kwargs:
             kwargs['port'] = 5432
         
-        # Support for PostgreSQL .pgpass
         self._use_pgpass = kwargs.pop('use_pgpass', False)
         
         super().__init__(host, database, user, password, **kwargs)
@@ -130,8 +130,8 @@ class PostgresClient(ConnectionConfigMixin,
     @_check_wal_level
     @check_basebackup
     @requires_replication_privilege
-    def backup_full(self, outpath: str) -> bool:
-        """Creates a full PostgreSQL backup using pg_basebackup with WAL archiving"""
+    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
+        """Create full database backup with zstd compression"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full backup → {base_path}")
         
@@ -169,9 +169,7 @@ class PostgresClient(ConnectionConfigMixin,
         
         env = os.environ.copy()
         
-        # Use .pgpass if configured, otherwise use PGPASSWORD
         if self._use_pgpass:
-            # Remove PGPASSWORD to force use of .pgpass
             env.pop('PGPASSWORD', None)
             self._messenger.info("Using PostgreSQL .pgpass for authentication")
             metadata["auth_method"] = "pgpass"
@@ -233,6 +231,17 @@ class PostgresClient(ConnectionConfigMixin,
             with open(metadata_file, 'w') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
             self._messenger.info(f"Metadata saved: {metadata_file}")
+            
+            if single_archive:
+                self._messenger.section_header("Creating Single Archive (zstd)")
+                archive_path = create_single_archive(backup_dir, self._logger, self._messenger)
+                if archive_path:
+                    metadata["archive_path"] = str(archive_path)
+                    metadata["archive_format"] = "tar+zstd"
+                    metadata["archive_size_bytes"] = archive_path.stat().st_size
+                    self._messenger.success(f"✓ Single archive ready: {archive_path.name}")
+                else:
+                    self._messenger.warning("Single archive creation skipped/failed - backup remains as directory")
             
             self._logger.finish_backup(metadata, success=True)
             return True

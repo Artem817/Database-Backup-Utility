@@ -16,6 +16,10 @@ class ConnectionConfigMixin:
                                                                       log_file=f"backup_{database}.log")
         self._messenger = messenger if messenger is not None else get_messenger()
         self._compressing_level = _compressing_level #TODO CLI REQUEST
+        
+        # Initialize optional attributes for different database types
+        self._login_path = None
+        self._socket = None
 
     @property
     def database_name(self):
@@ -31,11 +35,15 @@ class ConnectionConfigMixin:
             'database': self._database
         }
         
-        if self._login_path:
+        # Only include optional params if they exist
+        if hasattr(self, '_login_path') and self._login_path:
             params['login_path'] = self._login_path
         
-        if self._socket:
+        if hasattr(self, '_socket') and self._socket:
             params['socket'] = self._socket
+            
+        if hasattr(self, '_use_pgpass') and self._use_pgpass:
+            params['use_pgpass'] = self._use_pgpass
         
         return params
 

@@ -14,7 +14,7 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def backup_full(self, outpath: str) -> bool:
+    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
         """Create full database backup with zstd compression"""
         pass
 

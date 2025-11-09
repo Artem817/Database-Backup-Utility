@@ -104,7 +104,6 @@ def validate_postgres_pgpass(host: str, port: str, database: str, user: str) -> 
         messenger.info(f"Fix with: chmod 0600 {pgpass_path}")
         return False
     
-    # Check if entry exists
     with open(pgpass_path, 'r') as f:
         entries = f.readlines()
     
@@ -143,7 +142,6 @@ def validate_postgres_connection_with_pgpass(host: str, port: str, database: str
     messenger = get_messenger()
     
     try:
-        # Use psql to test connection (won't prompt for password if .pgpass is correct)
         result = subprocess.run(
             [
                 "psql",
@@ -225,7 +223,6 @@ def validate_profile_config(args, parser):
     messenger.section_header("🔐 Secure Profile Configuration")
     
     if args.db == "mysql":
-        # MySQL login-path configuration
         default_login_path = "xtrabackup"
         login_path = input(f"Enter MySQL login-path (default: {default_login_path}): ").strip() or default_login_path
         
@@ -237,7 +234,6 @@ def validate_profile_config(args, parser):
             messenger.error("MySQL connection validation failed")
             sys.exit(1)
         
-        # Optional socket configuration
         socket_path = input("MySQL socket path (press Enter to skip): ").strip()
         
         if not socket_path:
@@ -246,7 +242,6 @@ def validate_profile_config(args, parser):
             if socket_path:
                 messenger.success(f"Detected socket: {socket_path}")
         
-        # Optional host/port override
         host_override = input("Host override (press Enter to use login-path default): ").strip()
         port_override = input("Port override (press Enter to use login-path default): ").strip()
         
@@ -258,11 +253,10 @@ def validate_profile_config(args, parser):
             'port': int(port_override) if port_override else None,
             'dbname': dbname,
             'user': None,  # Stored in login-path
-            'password': None  # Stored in login-path
+            'password': None 
         }
     
     elif args.db == "postgres":
-        # PostgreSQL .pgpass configuration
         messenger.info("PostgreSQL uses ~/.pgpass for secure credential storage")
         
         host = input("Host (default: localhost): ").strip() or "localhost"

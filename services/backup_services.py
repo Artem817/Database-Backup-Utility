@@ -11,7 +11,8 @@ class BackupService:
         if not parsed_args.path:
             raise ValueError("Path is required. Use: full database -path <path>")
         
-        self.dbclient.backup_full(outpath=parsed_args.path)
+        single_archive = getattr(parsed_args, 'single_archive', True)
+        self.dbclient.backup_full(outpath=parsed_args.path, single_archive=single_archive)
     
     def differential_backup(self, parsed_args) -> None:
         """Handle differential WAL backup"""

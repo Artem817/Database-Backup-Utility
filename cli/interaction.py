@@ -41,6 +41,7 @@ def parse_query_args(query: str):
     parser.add_argument("-compress", type=str_to_bool_caster, default=False, help="Compression flag")
     parser.add_argument("-tablename", action='append', help="Table name (repeatable)")
     parser.add_argument("-extract", action='store_true', help="Extract SQL result to CSV")
+    parser.add_argument("-single-archive", type=str_to_bool_caster, default=True, help="Create single .tar.zst archive")
     try:
         known_args, command_tokens = parser.parse_known_args(query.split())
         return known_args, command_tokens
