@@ -5,12 +5,20 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import Completer, Completion
 from typing import Union
-
+from prompt_toolkit.shortcuts import radiolist_dialog
+from prompt_toolkit.styles import Style
 from commands.registry import build_dispatcher 
 
 from clients.postgres_client import PostgresClient
 from clients.mysql_client import MysqlClient
 from console_utils import get_messenger, MessageLevel
+from enum import Enum
+
+class StorageType(Enum):
+    LOCAL = "local"
+    S3 = "s3"
+    # GCS = "gcs" 
+    # AZURE = "azure"
 
 def print_sql_preview(rows: list, limit: int = 10):
     messenger = get_messenger()
@@ -24,6 +32,48 @@ def print_sql_preview(rows: list, limit: int = 10):
             print(f"... {len(rows) - limit} more rows hidden")
             break
 
+async def select_storage_type() -> StorageType:
+    """Selecting a storage location without a dialogue box, directly in the console."""
+    
+    messenger = get_messenger()
+    session = PromptSession()
+    
+    options = [
+        (1, StorageType.LOCAL, "Local Filesystem"),
+        (2, StorageType.S3, "AWS S3 Bucket Not Implemented"),
+        #(3, StorageType.GCS, "Google Cloud Storage Not Implemented"),
+    ]
+    
+    print("\n--- Storage Configuration ---")
+    for num, enum_val, desc in options:
+        print(f"  {messenger._get_colored_message(str(num), MessageLevel.INFO)}. {desc}")
+    print("-----------------------------\n")
+
+    while True:
+        try:
+            selection = await session.prompt_async(HTML('<b>Select storage [1/2]:</b> '))
+            
+            if not selection:
+                return StorageType.LOCAL
+
+            selection = selection.strip()
+            #TODO: Implement
+            if selection == "2":
+                messenger.warning("AWS S3 storage is not yet implemented. Defaulting to Local Filesystem.")
+                return StorageType.LOCAL
+            
+            try:
+                choice_index = int(selection)
+                if 1 <= choice_index <= len(options):
+                    return options[choice_index - 1][1]
+                else:
+                    messenger.warning("Invalid choice. Please enter 1 or 2.")
+            except ValueError:
+                messenger.warning("Invalid input. Please enter a number (1 or 2).")
+                
+        except KeyboardInterrupt:
+            return StorageType.LOCAL
+        
 def str_to_bool_caster(v):
     if isinstance(v, bool):
         return v
@@ -75,11 +125,22 @@ class SQLCompleter(Completer):
                     yield Completion(cmd, start_position=-len(word_before_cursor))
 
 
+
 async def interactive_console(db_client: Union[PostgresClient, MysqlClient], dbname: str, user: str):
     
     messenger = get_messenger()
-    dispatcher =  build_dispatcher(db_client, messenger)    
     
+    print(f"{'='*80}")
+    messenger.info("Database Backup Utility - Initial Configuration")
+    print()
+    
+    storage_type = await select_storage_type()
+    
+    messenger.success(f"✓ Storage configured: {storage_type.value}")
+    
+    db_client._storage_type = storage_type.value
+    
+    dispatcher = build_dispatcher(db_client, messenger, storage_type= storage_type.value)
     
     history_file = Path.home() / ".db_backup_history"
     session = PromptSession(
@@ -90,9 +151,16 @@ async def interactive_console(db_client: Union[PostgresClient, MysqlClient], dbn
         enable_history_search=True,
     )
 
-    print(f"{'='*80}")
+    print(f"\n{'='*80}")
+
+    messenger.section_header(f"Storage: {storage_type.value.upper()}")
+    messenger.info("")
+
     messenger.info("Database Backup Utility")
     print(f"Connected to: {messenger._get_colored_message(dbname, MessageLevel.SUCCESS)} as {messenger._get_colored_message(user, MessageLevel.SUCCESS)}")
+    
+
+    #print(f"Storage: {messenger._get_colored_message(storage_type.value.upper(), MessageLevel.INFO)}")
     print("Type 'help' for commands or 'exit' to quit\n")
 
     while True:

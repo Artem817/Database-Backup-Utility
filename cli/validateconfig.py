@@ -4,7 +4,6 @@ import subprocess
 from pathlib import Path
 from console_utils import get_messenger
 
-
 def validate_mysql_login_path(login_path: str) -> bool:
     """Validate that MySQL login-path exists in mysql_config_editor"""
     messenger = get_messenger()
@@ -252,7 +251,7 @@ def validate_profile_config(args, parser):
             'host': host_override or None,
             'port': int(port_override) if port_override else None,
             'dbname': dbname,
-            'user': None,  # Stored in login-path
+            'user': None,  
             'password': None 
         }
     

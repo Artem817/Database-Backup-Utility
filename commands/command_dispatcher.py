@@ -1,6 +1,7 @@
 class CommandDispatcher:
-    def __init__(self):
+    def __init__(self, storage_type: str = "local"):
         self.commands = {}
+        self.storage_type = storage_type  
         
     def register_command(self, command_name: str, handler):
         self.commands[command_name.lower()] = handler
@@ -25,6 +26,9 @@ class CommandDispatcher:
         
         if mapped_command not in self.commands:
             raise ValueError(f"Command '{command_name}' not recognized.")
+        
+        if mapped_command in ["full_backup", "partial_backup", "differential_backup"]:
+            parsed_args.storage_type = self.storage_type
             
         return self.execute_command(mapped_command, parsed_args)
         

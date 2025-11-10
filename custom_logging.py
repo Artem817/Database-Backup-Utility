@@ -36,7 +36,7 @@ class BackupLogger:
 
         self.catalog = BackupCatalog()
 
-    def start_backup(self, backup_type: str, database: str, database_version: str, utility_version: str, compress: bool) -> Dict[str, Any]:
+    def start_backup(self, backup_type: str, database: str, storage: str, database_version: str, utility_version: str, compress: bool) -> Dict[str, Any]:
         timestamp_start = datetime.now(timezone.utc)
         backup_id = generate_backup_id(backup_type, database, timestamp_start)
         parent_backup_id = None
@@ -65,6 +65,7 @@ class BackupLogger:
             "parent_backup_id": parent_backup_id,
             "base_backup_id": base_backup_id,
             "compress": compress,
+            "storage": storage,
             "compress_format": "zip",
             "status": "in_progress",
             "tables": {},

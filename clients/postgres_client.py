@@ -130,7 +130,7 @@ class PostgresClient(ConnectionConfigMixin,
     @_check_wal_level
     @check_basebackup
     @requires_replication_privilege
-    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
+    def backup_full(self, outpath: str, single_archive: bool = True, storage = 'local') -> bool:
         """Create full database backup with zstd compression"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full backup → {base_path}")
@@ -140,7 +140,8 @@ class PostgresClient(ConnectionConfigMixin,
             database=self._database,
             database_version=self._database_version or "Unknown",
             utility_version="pg_basebackup",
-            compress=True 
+            compress=True,
+            storage=storage
         )
         
         timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))

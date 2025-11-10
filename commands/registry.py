@@ -2,8 +2,8 @@ from .command_dispatcher import CommandDispatcher
 from services.backup_services import BackupService
 from console_utils import MessageLevel
 
-def build_dispatcher(db_client, messenger):
-    dispatcher = CommandDispatcher()
+def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
+    dispatcher = CommandDispatcher(storage_type = storage_type)
     backup_service = BackupService(db_client)
     
     def help_command(parsed_args):
