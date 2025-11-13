@@ -6,6 +6,8 @@ from datetime import datetime
 from pathlib import Path
 import subprocess
 import os
+import tarfile
+import tempfile
 
 
 class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
@@ -26,7 +28,8 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
             self._messenger.error(f"Failed to write metadata file: {e}")
             self._logger.error(f"Failed to write metadata file: {e}")
             return False
-    
+        
+    #FIXME: Everything that goes into /pg_wal should be removed from the code.
     def perform_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
         """Creates a differential PostgreSQL backup by archiving WAL files since last full backup"""
         self._messenger.warning("Starting differential WAL backup...")
@@ -73,7 +76,7 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 current_lsn = cur.fetchone()[0]
                 
                 cur.execute("SELECT pg_walfile_name(pg_current_wal_lsn());")
-                current_wal_file = cur.fetchone()[0]
+                current_wal_file = cur.fetchone()[0]            
                 
                 cur.execute("SHOW data_directory;")
                 data_dir = cur.fetchone()[0]
@@ -84,9 +87,6 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                     self._messenger.error(f"Full backup WAL archive not found: {full_backup_wal}")
                     self._logger.finish_backup(metadata, success=False)
                     return False
-                
-                import tarfile
-                import tempfile
                 
                 last_backup_wal_file = None
                 with tempfile.TemporaryDirectory() as tmpdir:
@@ -122,6 +122,7 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 switch_lsn = cur.fetchone()[0]
                 self._messenger.info(f"Switched WAL to LSN: {switch_lsn}")
             
+            # FIXME: Handle permission errors when accessing pg_wal
             pg_wal_dir = Path(data_dir) / "pg_wal"
             
             if not pg_wal_dir.exists():

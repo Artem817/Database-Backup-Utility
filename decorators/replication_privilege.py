@@ -64,4 +64,43 @@ def _check_wal_level(func):
             return None
     
     return wrapper  
-    
+
+
+def _check_archive_mode(func):
+    """
+    Decorator to check if archive_mode is set to 'on' or 'always'.
+    This is a critical prerequisite for any PITR-capable backup strategy.
+    """
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        query = "SHOW archive_mode;"
+        
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(query)
+                result = cursor.fetchone()
+                
+                if result and result[0] in ('on', 'always'):
+                    self._messenger.success(f"✓ Prerequisite check: archive_mode is '{result[0]}'.")
+                    self._logger.info(f"archive_mode check passed: '{result[0]}'.")
+                    return func(self, *args, **kwargs)
+                else:
+                    self._messenger.error(
+                    f"archive_mode is set to '{result[0]}'. It must be 'on' or 'always' for PITR."
+                    "\n\nINSTRUCTION: To enable PITR, please configure **TWO** parameters in postgresql.conf:"
+                    "\n1. wal_level = replica (if not already set)"
+                    "\n2. archive_mode = on (or 'always' for PG13+)"
+                    "\n3. archive_command = 'cp %p /path/to/wal_archive/%f' (Choose your secure path!)"
+                    "\n\nAfter making changes, you MUST restart PostgreSQL."
+                    "\nBackup cannot proceed without this setting."
+
+                    )
+                    self._logger.error(f"archive_mode check failed: '{result[0]}'. Backup aborted.")
+                    return False 
+
+        except Exception as e:
+            self._messenger.error(f"Failed to check archive_mode: {e}")
+            self._logger.error(f"Failed to check archive_mode: {e}")
+            return False 
+        
+    return wrapper

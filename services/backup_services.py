@@ -13,7 +13,7 @@ class BackupService:
         
         storage_type = getattr(parsed_args, 'storage_type', 'local')
         single_archive = getattr(parsed_args, 'single_archive', True)
-        self.dbclient.backup_full(outpath=parsed_args.path, single_archive=single_archive, strorage=storage_type)
+        self.dbclient.backup_full(outpath=parsed_args.path, single_archive=single_archive, storage=storage_type)
         
         
     def differential_backup(self, parsed_args) -> None:

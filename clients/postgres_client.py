@@ -12,7 +12,7 @@ from services.interfaces import IConnectionProvider
 from typing import Optional, Tuple, Any, List
 from decorators.types_decorators import not_none
 import subprocess
-from decorators.replication_privilege import requires_replication_privilege, _check_wal_level
+from decorators.replication_privilege import _check_archive_mode, requires_replication_privilege, _check_wal_level
 from decorators.check_basebackup_decorator import check_basebackup
 import json
 from services.backup.archive_utils import create_single_archive
@@ -127,6 +127,7 @@ class PostgresClient(ConnectionConfigMixin,
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
     
+    @_check_archive_mode
     @_check_wal_level
     @check_basebackup
     @requires_replication_privilege
@@ -160,7 +161,9 @@ class PostgresClient(ConnectionConfigMixin,
             "-X", "stream",  
             "-c", "fast",  
             "-P", 
-            "-v"  
+            "-v",
+            '-l', f"UTIL_FULL_{backup_id}", 
+            '--manifest-checksums=SHA256' 
         ]
         
         if hasattr(self, '_compressing_level') and self._compressing_level:
