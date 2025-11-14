@@ -36,7 +36,8 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
             database=connection_params["database"],
             database_version="xtrabackup-based",
             utility_version="xtrabackup",
-            compress=True
+            compress=True,
+            storage="local" 
         )
         
         last_full_backup_location = metadata_reader.get_output_path_from_last_full_backup()
@@ -53,19 +54,16 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
             self._logger.finish_backup(metadata, success=False)
             return False
         
-        # Store differential backups NEXT TO full backup
         backup_root_dir = full_backup_path.parent
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         diff_backup_dir = backup_root_dir / f"differential_{connection_params['database']}_{timestamp}_{metadata['id'].split('_')[-1]}"
         diff_backup_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save reference to base full backup
         base_backup_ref = diff_backup_dir / "base_backup_id.txt"
         base_backup_ref.write_text(full_backup_path.name)
         
         try:
-            # Build xtrabackup incremental command
             user = str(connection_params.get('user', '')).strip('"').strip("'")
             password = connection_params.get('password', '')
             
@@ -81,7 +79,6 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 "--compress-threads=4"
             ]
             
-            # Add password if provided
             if password:
                 xtrabackup_cmd.append(f"--password={password}")
             
@@ -100,7 +97,6 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 self._logger.finish_backup(metadata, success=False)
                 return False
             
-            # Calculate backup size
             total_size = sum(f.stat().st_size for f in diff_backup_dir.rglob('*') if f.is_file())
             
             self._messenger.success(f"Differential backup created at {diff_backup_dir}")
@@ -112,7 +108,6 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
             metadata["parent_backup_id"] = full_backup_path.name
             metadata["xtrabackup_output"] = result.stdout[-500:] if result.stdout else ""
             
-            # Save metadata
             self.write_metadata_file(metadata, diff_backup_dir)
             
             self._logger.finish_backup(metadata, success=True)

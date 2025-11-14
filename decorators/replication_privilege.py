@@ -1,15 +1,14 @@
 from functools import wraps
 
 def requires_replication_privilege(func):
-    """Decorator to ensure the user has replication privileges."""
     @wraps(func)
-    def wrapper(self, *args, **kwargs):
-        query = f"SELECT rolreplication FROM pg_roles WHERE rolname = '{self._user}';"
+    def wrapper(self, *args, **kwargs) -> bool:
+        query = "SELECT rolreplication FROM pg_roles WHERE rolname = %s;"
         
         has_privilege = False
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(query)
+                cursor.execute(query, (self._user,))
                 result = cursor.fetchone()
                 
                 if result and result[0] is True:
@@ -22,48 +21,48 @@ def requires_replication_privilege(func):
                         f"\nINSTRUCTION: Run 'ALTER ROLE {self._user} WITH REPLICATION;' as a superuser."
                     )
                     self._logger.error(f"Replication privilege check failed for user '{self._user}'.")
-
         except Exception as e:
             self._messenger.error(f"Failed to check replication privilege: {e}")
             self._logger.error(f"Failed to check replication privilege: {e}")
-            return None
+            return False
 
-        if has_privilege:
-            return func(self, *args, **kwargs)
-        else:
-            return None
+        if not has_privilege:
+            return False
+        
+        return func(self, *args, **kwargs)
     
     return wrapper
 
 def _check_wal_level(func):
-    """Decorator to check if wal_level is set to 'replica' or higher."""
     @wraps(func)
-    def wrapper(self, *args, **kwargs):
+    def wrapper(self, *args, **kwargs) -> bool:
         query = "SHOW wal_level;"
         
         try:
             with self.connection.cursor() as cursor:
                 cursor.execute(query)
                 result = cursor.fetchone()
+                level = result[0] if result else None
                 
-                if result and result[0] in ('replica', 'logical', 'archive'):
-                    self._messenger.success(f"wal_level is set to '{result[0]}'.")
-                    self._logger.info(f"wal_level check passed: '{result[0]}'.")
+                if level in ('replica', 'logical', 'archive'):
+                    self._messenger.success(f"wal_level is set to '{level}'.")
+                    self._logger.info(f"wal_level check passed: '{level}'.")
                     return func(self, *args, **kwargs)
                 else:
                     self._messenger.error(
-                        f"wal_level is set to '{result[0]}'. It must be 'replica' or higher for replication."
+                        f"wal_level is set to '{level}'. It must be 'replica' or higher for replication."
                         "\nINSTRUCTION: Set wal_level to 'replica' or higher in postgresql.conf and restart the server."
                     )
-                    self._logger.error(f"wal_level check failed: '{result[0]}'.")
-                    return None
+                    self._logger.error(f"wal_level check failed: '{level}'.")
+                    return False
 
         except Exception as e:
             self._messenger.error(f"Failed to check wal_level: {e}")
             self._logger.error(f"Failed to check wal_level: {e}")
-            return None
+            return False
     
-    return wrapper  
+    return wrapper
+
 
 
 def _check_archive_mode(func):

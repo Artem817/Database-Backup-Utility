@@ -16,6 +16,7 @@ from decorators.replication_privilege import _check_archive_mode, requires_repli
 from decorators.check_basebackup_decorator import check_basebackup
 import json
 from services.backup.archive_utils import create_single_archive
+from cli.postgres_wal_config import PostgresWalArchiveConfig
 
 class PostgresClient(ConnectionConfigMixin,
                      BackupCatalogMixin,
@@ -31,6 +32,31 @@ class PostgresClient(ConnectionConfigMixin,
         
         super().__init__(host, database, user, password, **kwargs)
         self._connection: Optional[connection] = None
+        
+        self._archive_path: Optional[str] = None
+        self._wal_config = PostgresWalArchiveConfig()
+        self._configure_wal_archive()
+
+    def _configure_wal_archive(self) -> None:
+        """Configure WAL archive directory on initialization"""
+        try:
+            self._archive_path = self._wal_config.configure_archive_directory()
+            
+            if self._archive_path:
+                self._messenger.info(f"WAL archive directory: {self._archive_path}")
+                self._logger.info(f"WAL archive path configured: {self._archive_path}")
+            else:
+                self._messenger.warning("WAL archive directory not configured")
+                self._logger.warning("WAL archive path not configured")
+        except Exception as e:
+            self._messenger.error(f"Failed to configure WAL archive: {e}")
+            self._logger.error(f"WAL archive configuration error: {e}")
+            self._archive_path = None
+
+    @property
+    def archive_path(self) -> Optional[str]:
+        """Get the configured WAL archive path"""
+        return self._archive_path
 
     def connect(self) -> Optional[connection]:
         try:
