@@ -5,6 +5,9 @@ from datetime import datetime
 from pathlib import Path
 import tarfile
 import shutil
+from pathlib import Path
+
+from services.walvalidation.wal_check import WalChainValidation
 
 
 class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
@@ -86,7 +89,6 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 return False
 
             with connection.cursor() as cur:
-                # Get current LSN and WAL file
                 cur.execute("SELECT pg_current_wal_lsn();")
                 current_lsn = cur.fetchone()[0]
 
@@ -180,6 +182,33 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                 self.write_metadata_file(metadata, diff_backup_dir)
                 self._logger.finish_backup(metadata, success=True)
                 return True
+            
+            validator = WalChainValidation(
+                archived_wal_files=new_wal_files,          
+                last_full_backup_wal_file=last_backup_wal_file,
+                current_wal_file=current_wal_file,
+                wal_archive_directory=archive_directory,
+                logger=self._logger,
+                messenger=self._messenger,
+            )
+
+            if not validator.timeline_consistency_check():
+                metadata["mode"] = "wal_timeline_invalid"
+                self.write_metadata_file(metadata, diff_backup_dir)
+                self._logger.finish_backup(metadata, success=False)
+                return False
+
+            if not validator.validate_sequence_gaps():
+                metadata["mode"] = "wal_sequence_gap"
+                self.write_metadata_file(metadata, diff_backup_dir)
+                self._logger.finish_backup(metadata, success=False)
+                return False
+
+            if not validator.basic_wal_file_sanity_check():
+                metadata["mode"] = "wal_sanity_failed"
+                self.write_metadata_file(metadata, diff_backup_dir)
+                self._logger.finish_backup(metadata, success=False)
+                return False
 
             first_wal = new_wal_files[0]
             last_wal = new_wal_files[-1]

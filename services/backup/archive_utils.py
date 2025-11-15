@@ -152,9 +152,9 @@ def extract_archive(archive_path: Path, output_dir: Path, logger, messenger) -> 
         # Use pipe for macOS BSD tar compatibility
         zstd_decompress = [
             "zstd",
-            "-d",  # Decompress
-            "-c",  # Output to stdout
-            "-T4",  # 4 threads
+            "-d", 
+            "-c", 
+            "-T4",  
             str(archive_path)
         ]
         

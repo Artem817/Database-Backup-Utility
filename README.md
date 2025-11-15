@@ -37,6 +37,7 @@ The utility uses native database backup tools instead of SQL dumps:
 **PostgreSQL:**
 - Full backup: `pg_basebackup` with tar format and gzip compression
 - WAL archiving: Continuous archiving from `pg_wal` directory for PITR
+- **WAL chain validation** (sequence gaps, timeline consistency, file integrity — **basic**)
 - Requires REPLICATION privilege and `wal_level = replica`
 
 **MySQL:**

@@ -178,7 +178,7 @@ class MysqlClient(ConnectionConfigMixin,
         return query_executor.execute_query(query)
         
     @check_utility_available("xtrabackup")
-    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
+    def backup_full(self, outpath: str, single_archive: bool = True, storage: str = "local") -> bool:
         """Create full database backup with zstd compression"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full MySQL backup with xtrabackup → {base_path}")
@@ -188,7 +188,8 @@ class MysqlClient(ConnectionConfigMixin,
             database=self._database,
             database_version=self._database_version or "Unknown",
             utility_version="xtrabackup",
-            compress=True
+            compress=True,
+            storage=storage
         )
         
         timestamp_start = datetime.fromisoformat(metadata["timestamp_start"].replace('Z', '+00:00'))
