@@ -1,7 +1,5 @@
 # Database Backup Utility - Physical Backup with WAL Archiving
 
-[![Status: Suspended](https://www.repostatus.org/badges/latest/suspended.svg)](https://www.repostatus.org/#suspended)
-
 A database backup utility implementing native physical backup methods with WAL-based archiving for PostgreSQL and MySQL. This project is currently in active development and should be considered experimental.
 
 ## Current Implementation Status
