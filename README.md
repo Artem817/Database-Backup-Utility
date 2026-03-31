@@ -1,9 +1,5 @@
 # Database Backup Utility - Physical Backup with WAL Archiving
 
-[![Status: Suspended](https://www.repostatus.org/badges/latest/suspended.svg)](https://www.repostatus.org/#suspended)
-
-A database backup utility implementing native physical backup methods for PostgreSQL and MySQL, with WAL-based differential backups for PostgreSQL and `xtrabackup`-based differential backups for MySQL. The repository is experimental and development is currently paused.
-
 ## Current Implementation Status
 
 **Working Features:**
