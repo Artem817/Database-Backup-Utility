@@ -12,16 +12,22 @@ class BackupMetadataReader:
     def _get_backups(self):
         return self._catalog.catalog.get("backups", [])
     
-    def _get_last_full_backup_info(self, info_type: str) -> str | list[str] | None:
+    def _get_last_full_backup_info(
+        self, info_type: str
+    ) -> datetime | str | list[str] | None:
         self._messenger.info(f"Fetching last full backup info for type: {info_type}")
         backups = self._get_backups()
         
         self._messenger.info(f"Total backups found: {len(backups)}")
         full_backups = [
             backup for backup in backups
-            if backup.get("database_name") == self._database and backup.get("type") == "full"
+            if backup.get("database_name") == self._database
+            and backup.get("type") == "full"
+            and backup.get("status") == "completed"
         ]
-        self._messenger.info(f"Full backups for database '{self._database}': {len(full_backups)}")
+        self._messenger.info(
+            f"Completed full backups for database '{self._database}': {len(full_backups)}"
+        )
         sorted_backups = sorted(full_backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
         if sorted_backups:
             last_backup = sorted_backups[0]
@@ -36,13 +42,12 @@ class BackupMetadataReader:
                 tables = last_backup.get("tables", {})
                 self._messenger.info(f"Tables in last full backup: {list(tables.keys())}")
                 return list(tables.keys())
-            elif info_type == "backup_location":
-                return last_backup.get("backup_location")
+            return last_backup.get(info_type)
             
-        self._messenger.warning("No full backups found.")
+        self._messenger.warning("No completed full backups found.")
         return None
     
-    def get_last_full_backup_timestamp(self) -> str | None:
+    def get_last_full_backup_timestamp(self) -> datetime | None:
         return self._get_last_full_backup_info("timestamp")
     
     def last_full_manifest_path(self) -> str | None:
@@ -53,11 +58,25 @@ class BackupMetadataReader:
  
     def get_output_path_from_last_full_backup(self) -> str | None:
         self._messenger.info("Retrieving last full backup location...")
-        self._messenger.info(f"self._database: {self._database}")
         return self._get_last_full_backup_info("backup_location")
     
     def get_backup_diff_outpath(self) -> str | None:
         return self._get_last_full_backup_info("backup_diff_path")
+
+    def get_successful_backup(self) -> dict | None:
+        backups = [
+            backup
+            for backup in self._get_backups()
+            if backup.get("database_name") == self._database
+            and backup.get("status") == "completed"
+        ]
+        if not backups:
+            self._messenger.warning("No successful backups found.")
+            return None
+
+        successful_backup = max(backups, key=lambda b: b.get("timestamp_start", ""))
+        self._messenger.info(f"Last successful backup found: {successful_backup['id']}")
+        return successful_backup
     
     def get_backup_history(self, limit: int = 10) -> list:
         backups = self._get_backups()

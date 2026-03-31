@@ -33,6 +33,7 @@ class QueryExecutor:
         self._messenger = messenger
 
     def execute_query(self, query: str):
+        connection = None
         is_safe, message = analyze_sql(query)
         if not is_safe:
             self._messenger.warning(message)
@@ -65,7 +66,11 @@ class QueryExecutor:
         except Exception as e:
             self._messenger.error(f"Query failed: {e}")
             self._logger.error(f"Query failed: {e}")
-            connection.rollback()
+            if connection is not None:
+                try:
+                    connection.rollback()
+                except Exception:
+                    self._logger.warning("Rollback failed after query error")
             return None
 
     def extract_sql_query(self, query: str, outpath, query_result_exporter):
@@ -80,4 +85,3 @@ class QueryExecutor:
         else:
             self._logger.error("Query extraction failed")
         return result
-

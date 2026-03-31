@@ -1,13 +1,12 @@
-from clients.postgres_client import PostgresClient
 from custom_logging import BackupCatalog
 from services.backup.metadata import BackupMetadataReader
 
 class BackupService:
-    def __init__(self, dbclient: PostgresClient) -> None:
+    def __init__(self, dbclient) -> None:
         self.dbclient = dbclient
     
     def full_backup(self, parsed_args) -> None:
-        """Handle full WAL backup"""
+        """Handle full physical backup"""
         if not parsed_args.path:
             raise ValueError("Path is required. Use: full database -path <path>")
         
@@ -17,7 +16,7 @@ class BackupService:
         
         
     def differential_backup(self, parsed_args) -> None:
-        """Handle differential WAL backup"""
+        """Handle differential backup for the current database"""
         metadata_reader = BackupMetadataReader(
             BackupCatalog(),
             self.dbclient._messenger,
@@ -43,4 +42,3 @@ class BackupService:
             if not parsed_args.path:
                 raise ValueError("Path required. Use: SQL <query> -extract -path <path>")
             self.dbclient.extract_sql_query(sql_query, parsed_args.path)
-

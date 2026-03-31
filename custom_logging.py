@@ -36,26 +36,33 @@ class BackupLogger:
 
         self.catalog = BackupCatalog()
 
-    def start_backup(self, backup_type: str, database: str, storage: str, database_version: str, utility_version: str, compress: bool) -> Dict[str, Any]:
+    def start_backup(
+        self,
+        backup_type: str,
+        database: str,
+        storage: str,
+        database_version: str,
+        utility_version: str,
+        compress: bool,
+        database_type: str = "unknown",
+    ) -> Dict[str, Any]:
         timestamp_start = datetime.now(timezone.utc)
         backup_id = generate_backup_id(backup_type, database, timestamp_start)
         parent_backup_id = None
         base_backup_id = None
 
         if backup_type == "incremental":
-            last_backup = self.catalog.get_last_backup()
+            last_backup = self.catalog.get_last_successful_backup()
             parent_backup_id = last_backup.get("id") if last_backup else None
         elif backup_type == "differential":
             last_full = self.catalog.get_last_full_backup()
             base_backup_id = last_full.get("id") if last_full else None
-
-        print("Current database:", database)
         
         metadata = {
             "id": backup_id,
             "type": backup_type,
             "version": utility_version,
-            "database_type": "postgresql",
+            "database_type": database_type,
             "database_version": database_version,
             "database_name": database,
             "backup_manifest_path" :"",
@@ -66,7 +73,7 @@ class BackupLogger:
             "base_backup_id": base_backup_id,
             "compress": compress,
             "storage": storage,
-            "compress_format": "zip",
+            "compress_format": None,
             "status": "in_progress",
             "tables": {},
             "statistics": {
@@ -91,6 +98,11 @@ class BackupLogger:
         metadata["timestamp_end"] = timestamp_end.isoformat()
         metadata["duration_seconds"] = duration
         metadata["status"] = "completed" if success else "failed"
+
+        if metadata["statistics"].get("total_size_bytes", 0) == 0:
+            backup_size = metadata.get("backup_size_bytes")
+            if isinstance(backup_size, int):
+                metadata["statistics"]["total_size_bytes"] = backup_size
 
         self.catalog.add_backup(metadata)
 
@@ -164,6 +176,15 @@ class BackupCatalog:
         if not backups:
             return None
         return max(backups, key=lambda b: b.get("timestamp_start", ""))
+
+    def get_last_successful_backup(self) -> Optional[Dict[str, Any]]:
+        backups = self.catalog.get("backups", [])
+        if not isinstance(backups, list):
+            raise ValueError("The backups must be a list.")
+        filtered = [b for b in backups if b.get("status") == "completed"]
+        if not filtered:
+            return None
+        return max(filtered, key=lambda b: b.get("timestamp_start", ""))
 
     def get_last_backup_id(self) -> Optional[str]:
         last = self.get_last_backup()

@@ -204,7 +204,14 @@ try:
     
     messenger.success("Connection established and validated successfully!\n")
     
-    asyncio.run(interactive_console(db_client=db_client, dbname=dbname, user=user))
+    asyncio.run(
+        interactive_console(
+            db_client=db_client,
+            dbname=dbname,
+            user=user,
+            initial_storage_type=args.storage,
+        )
+    )
 
 except KeyboardInterrupt:
     messenger.info("\n\nInterrupted by user. Exiting...")

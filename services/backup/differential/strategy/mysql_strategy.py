@@ -1,30 +1,16 @@
-from services.backup.differential.strategy_base import IDifferentialBackupStrategy
+from services.backup.differential.strategy_base import DifferentialBackupStrategyBase
 from services.backup.metadata import BackupMetadataReader
-import json
+import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
 
-class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
+class MySQLDifferentialBackupStrategy(DifferentialBackupStrategyBase):
     def __init__(self, connection_provider, logger, messenger):
+        super().__init__(logger, messenger)
         self._connection_provider = connection_provider
-        self._logger = logger
-        self._messenger = messenger
-    
-    def write_metadata_file(self, metadata: dict, output_path: Path) -> bool:
-        """Writes the backup metadata to a JSON file"""
-        try:
-            metadata_file = output_path / "metadata.json"
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
-            self._messenger.info(f"Metadata saved: {metadata_file}")
-            return True
-        except Exception as e:
-            self._messenger.error(f"Failed to write metadata file: {e}")
-            self._logger.error(f"Failed to write metadata file: {e}")
-            return False
-    
+
     def perform_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
         """Creates a differential MySQL backup using xtrabackup --incremental"""
         self._messenger.warning("Starting MySQL differential backup with xtrabackup...")
@@ -34,6 +20,7 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
         metadata = self._logger.start_backup(
             backup_type="differential",
             database=connection_params["database"],
+            database_type=connection_params.get("database_type", "mysql"),
             database_version="xtrabackup-based",
             utility_version="xtrabackup",
             compress=True,
@@ -66,34 +53,58 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
         try:
             user = str(connection_params.get('user', '')).strip('"').strip("'")
             password = connection_params.get('password', '')
-            
+            login_path = connection_params.get("login_path")
+            socket = connection_params.get("socket")
+
             xtrabackup_cmd = [
                 "xtrabackup",
                 "--backup",
                 f"--target-dir={diff_backup_dir}",
                 f"--incremental-basedir={full_backup_path}",
-                f"--host={connection_params.get('host', 'localhost')}",
-                f"--port={connection_params.get('port', 3306)}",
-                f"--user={user}",
                 "--compress",
                 "--compress-threads=4"
             ]
-            
-            if password:
-                xtrabackup_cmd.append(f"--password={password}")
+
+            env = None
+
+            if login_path:
+                xtrabackup_cmd.append(f"--login-path={login_path}")
+                if socket:
+                    xtrabackup_cmd.append(f"--socket={socket}")
+            else:
+                xtrabackup_cmd.extend(
+                    [
+                        f"--host={connection_params.get('host', 'localhost')}",
+                        f"--port={connection_params.get('port', 3306)}",
+                        f"--user={user}",
+                    ]
+                )
+                if socket:
+                    xtrabackup_cmd.append(f"--socket={socket}")
+                if password:
+                    env = os.environ.copy()
+                    env["MYSQL_PWD"] = password
             
             self._messenger.info(f"Running xtrabackup incremental backup...")
-            self._logger.info(f"Command: {' '.join([c if '--password' not in c else '--password=***' for c in xtrabackup_cmd])}")
+            self._logger.info(f"Command: {' '.join(xtrabackup_cmd)}")
             
             result = subprocess.run(
                 xtrabackup_cmd,
                 capture_output=True,
-                text=True
+                text=True,
+                env=env
             )
             
             if result.returncode != 0:
                 self._messenger.error(f"xtrabackup failed: {result.stderr}")
                 self._logger.error(f"xtrabackup stderr: {result.stderr}")
+                self._logger.finish_backup(metadata, success=False)
+                return False
+
+            checkpoints_file = diff_backup_dir / "xtrabackup_checkpoints"
+            if not checkpoints_file.exists():
+                self._messenger.error("xtrabackup_checkpoints not found - backup may be incomplete")
+                self._logger.error("Incremental xtrabackup_checkpoints file not found")
                 self._logger.finish_backup(metadata, success=False)
                 return False
             
@@ -106,12 +117,14 @@ class MySQLDifferentialBackupStrategy(IDifferentialBackupStrategy):
             metadata["backup_size_bytes"] = total_size
             metadata["parent_backup_location"] = str(full_backup_path)
             metadata["parent_backup_id"] = full_backup_path.name
+            metadata["backup_checkpoints_path"] = str(checkpoints_file)
             metadata["xtrabackup_output"] = result.stdout[-500:] if result.stdout else ""
             
-            self.write_metadata_file(metadata, diff_backup_dir)
-            
-            self._logger.finish_backup(metadata, success=True)
-            return True
+            return self.finalize_backup(
+                metadata,
+                diff_backup_dir,
+                success=True,
+            )
             
         except FileNotFoundError:
             self._messenger.error("xtrabackup utility not found. Please install Percona XtraBackup.")

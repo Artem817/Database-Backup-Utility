@@ -1,8 +1,6 @@
-from services.backup.differential.strategy_base import IDifferentialBackupStrategy
+from services.backup.differential.strategy_base import DifferentialBackupStrategyBase
 from services.backup.metadata import BackupMetadataReader
-import json
 from datetime import datetime
-from pathlib import Path
 import tarfile
 import shutil
 from pathlib import Path
@@ -10,24 +8,10 @@ from pathlib import Path
 from services.walvalidation.wal_check import WalChainValidation
 
 
-class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
+class PostgresDifferentialBackupStrategy(DifferentialBackupStrategyBase):
     def __init__(self, connection_provider, logger, messenger):
+        super().__init__(logger, messenger)
         self._connection_provider = connection_provider
-        self._logger = logger
-        self._messenger = messenger
-
-    def write_metadata_file(self, metadata: dict, output_path: Path) -> bool:
-        """Writes the backup metadata to a JSON file"""
-        try:
-            metadata_file = output_path / "metadata.json"
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
-            self._messenger.info(f"Metadata saved: {metadata_file}")
-            return True
-        except Exception as e:
-            self._messenger.error(f"Failed to write metadata file: {e}")
-            self._logger.error(f"Failed to write metadata file: {e}")
-            return False
 
     def perform_differential_backup(self, metadata_reader: BackupMetadataReader) -> bool:
         """
@@ -56,6 +40,7 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
         metadata = self._logger.start_backup(
             backup_type="differential",
             database=connection_params["database"],
+            database_type=connection_params.get("database_type", "postgresql"),
             database_version="WAL-based",
             utility_version="wal_archiving",
             compress=False,
@@ -63,9 +48,8 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
         )
 
         last_full_backup_location = metadata_reader.get_output_path_from_last_full_backup()
-        last_full_timestamp = metadata_reader.get_last_full_backup_timestamp()
 
-        if not last_full_backup_location or not last_full_timestamp:
+        if not last_full_backup_location:
             self._messenger.error("No previous full backup found. Cannot perform differential backup.")
             self._logger.finish_backup(metadata, success=False)
             return False
@@ -131,22 +115,28 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
                     self._messenger.warning("No new WAL files since last backup (database unchanged)")
                     self._logger.info("No changes detected - no new WAL files")
 
-                    metadata["backup_location"] = str(diff_backup_dir)
-                    metadata["backup_size_bytes"] = sum(
-                        f.stat().st_size for f in diff_backup_dir.rglob('*') if f.is_file()
+                    base_metadata = self._build_common_metadata(
+                        diff_backup_dir,
+                        full_backup_path,
+                        archive_directory,
+                        current_lsn,
+                        current_wal_file,
+                        last_backup_wal_file,
                     )
-                    metadata["wal_files_count"] = 0
-                    metadata["parent_backup_location"] = str(full_backup_path)
-                    metadata["parent_backup_id"] = full_backup_path.name
-                    metadata["current_lsn"] = current_lsn
-                    metadata["current_wal_file"] = current_wal_file
-                    metadata["last_backup_wal_file"] = last_backup_wal_file
-                    metadata["wal_archive_directory"] = str(archive_directory)
-                    metadata["mode"] = "no_changes"
+                    base_metadata.update(
+                        {
+                            "backup_size_bytes": self._calculate_dir_size(diff_backup_dir),
+                            "wal_files_count": 0,
+                            "mode": "no_changes",
+                        }
+                    )
 
-                    self.write_metadata_file(metadata, diff_backup_dir)
-                    self._logger.finish_backup(metadata, success=True)
-                    return True
+                    return self.finalize_backup(
+                        metadata,
+                        diff_backup_dir,
+                        success=True,
+                        extra_metadata=base_metadata,
+                    )
 
                 cur.execute("SELECT pg_switch_wal();")
                 switch_lsn = cur.fetchone()[0]
@@ -162,26 +152,33 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
 
             new_wal_files = [name for name in wal_files if name > last_backup_wal_file]
 
+            base_metadata = self._build_common_metadata(
+                diff_backup_dir,
+                full_backup_path,
+                archive_directory,
+                current_lsn,
+                current_wal_file,
+                last_backup_wal_file,
+            )
+
             if not new_wal_files:
                 self._messenger.warning("No new WAL files in archive since last full backup")
                 self._logger.info("No WAL archived between backups")
 
-                metadata["backup_location"] = str(diff_backup_dir)
-                metadata["backup_size_bytes"] = sum(
-                    f.stat().st_size for f in diff_backup_dir.rglob('*') if f.is_file()
+                base_metadata.update(
+                    {
+                        "backup_size_bytes": self._calculate_dir_size(diff_backup_dir),
+                        "wal_files_count": 0,
+                        "mode": "no_new_wal",
+                    }
                 )
-                metadata["wal_files_count"] = 0
-                metadata["parent_backup_location"] = str(full_backup_path)
-                metadata["parent_backup_id"] = full_backup_path.name
-                metadata["current_lsn"] = current_lsn
-                metadata["current_wal_file"] = current_wal_file
-                metadata["last_backup_wal_file"] = last_backup_wal_file
-                metadata["wal_archive_directory"] = str(archive_directory)
-                metadata["mode"] = "no_new_wal"
 
-                self.write_metadata_file(metadata, diff_backup_dir)
-                self._logger.finish_backup(metadata, success=True)
-                return True
+                return self.finalize_backup(
+                    metadata,
+                    diff_backup_dir,
+                    success=True,
+                    extra_metadata=base_metadata,
+                )
             
             validator = WalChainValidation(
                 archived_wal_files=new_wal_files,          
@@ -193,22 +190,22 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
             )
 
             if not validator.timeline_consistency_check():
-                metadata["mode"] = "wal_timeline_invalid"
-                self.write_metadata_file(metadata, diff_backup_dir)
-                self._logger.finish_backup(metadata, success=False)
-                return False
+                base_metadata.update({"mode": "wal_timeline_invalid"})
+                return self.finalize_backup(
+                    metadata, diff_backup_dir, success=False, extra_metadata=base_metadata
+                )
 
             if not validator.validate_sequence_gaps():
-                metadata["mode"] = "wal_sequence_gap"
-                self.write_metadata_file(metadata, diff_backup_dir)
-                self._logger.finish_backup(metadata, success=False)
-                return False
+                base_metadata.update({"mode": "wal_sequence_gap"})
+                return self.finalize_backup(
+                    metadata, diff_backup_dir, success=False, extra_metadata=base_metadata
+                )
 
             if not validator.basic_wal_file_sanity_check():
-                metadata["mode"] = "wal_sanity_failed"
-                self.write_metadata_file(metadata, diff_backup_dir)
-                self._logger.finish_backup(metadata, success=False)
-                return False
+                base_metadata.update({"mode": "wal_sanity_failed"})
+                return self.finalize_backup(
+                    metadata, diff_backup_dir, success=False, extra_metadata=base_metadata
+                )
 
             first_wal = new_wal_files[0]
             last_wal = new_wal_files[-1]
@@ -232,35 +229,31 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
             if copied_count == 0:
                 self._messenger.error("Failed to copy any WAL files!")
                 self._logger.error("No WAL files copied to backup")
-                self._logger.finish_backup(metadata, success=False)
-                return False
+                base_metadata.update({"mode": "wal_copy_failed", "wal_files_count": 0})
+                return self.finalize_backup(
+                    metadata, diff_backup_dir, success=False, extra_metadata=base_metadata
+                )
 
             self._messenger.success(f"✓ Copied {copied_count}/{len(new_wal_files)} WAL files to backup")
 
-            total_size = sum(
-                f.stat().st_size for f in diff_backup_dir.rglob('*') if f.is_file()
-            )
+            total_size = self._calculate_dir_size(diff_backup_dir)
 
             self._messenger.info(f"Differential backup size: {total_size / (1024**2):.2f} MB")
 
-            metadata["backup_location"] = str(diff_backup_dir)
-            metadata["backup_size_bytes"] = total_size
-            metadata["wal_files_count"] = copied_count
-            metadata["wal_first_file"] = first_wal
-            metadata["wal_last_file"] = last_wal
-            metadata["current_lsn"] = current_lsn
-            metadata["current_wal_file"] = current_wal_file
-            metadata["parent_backup_location"] = str(full_backup_path)
-            metadata["parent_backup_id"] = full_backup_path.name
-            metadata["last_backup_wal_file"] = last_backup_wal_file
-            metadata["wal_archive_directory"] = str(archive_directory)
-            metadata["mode"] = "wal_backup"
+            base_metadata.update(
+                {
+                    "backup_size_bytes": total_size,
+                    "wal_files_count": copied_count,
+                    "wal_first_file": first_wal,
+                    "wal_last_file": last_wal,
+                    "mode": "wal_backup",
+                }
+            )
 
-            self.write_metadata_file(metadata, diff_backup_dir)
-            
             self._messenger.success(f"✓ Differential backup completed: {diff_backup_dir}")
-            self._logger.finish_backup(metadata, success=True)
-            return True
+            return self.finalize_backup(
+                metadata, diff_backup_dir, success=True, extra_metadata=base_metadata
+            )
 
         except PermissionError as e:
             self._messenger.error(f"Permission denied accessing archive directory: {e}")
@@ -275,3 +268,23 @@ class PostgresDifferentialBackupStrategy(IDifferentialBackupStrategy):
             self._logger.error(traceback.format_exc())
             self._logger.finish_backup(metadata, success=False)
             return False
+
+    def _build_common_metadata(
+        self,
+        diff_backup_dir: Path,
+        full_backup_path: Path,
+        archive_directory: Path,
+        current_lsn,
+        current_wal_file,
+        last_backup_wal_file,
+    ) -> dict:
+        """Compose metadata fields reused across success/failure branches."""
+        return {
+            "backup_location": str(diff_backup_dir),
+            "parent_backup_location": str(full_backup_path),
+            "parent_backup_id": full_backup_path.name,
+            "current_lsn": current_lsn,
+            "current_wal_file": current_wal_file,
+            "last_backup_wal_file": last_backup_wal_file,
+            "wal_archive_directory": str(archive_directory),
+        }

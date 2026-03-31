@@ -16,6 +16,7 @@ class ConnectionConfigMixin:
                                                                       log_file=f"backup_{database}.log")
         self._messenger = messenger if messenger is not None else get_messenger()
         self._compressing_level = _compressing_level #TODO CLI REQUEST
+        self._database_engine = getattr(self, "_database_engine", "unknown")
         
         # Initialize optional attributes for different database types
         self._login_path = None
@@ -32,7 +33,8 @@ class ConnectionConfigMixin:
             'port': self._port,
             'user': self._user,
             'password': self._password,
-            'database': self._database
+            'database': self._database,
+            'database_type': self._database_engine,
         }
         
         # Only include optional params if they exist
@@ -50,3 +52,6 @@ class ConnectionConfigMixin:
     def get_connection_params(self):
         return self.connection_params
 
+    @property
+    def database_engine(self):
+        return self._database_engine

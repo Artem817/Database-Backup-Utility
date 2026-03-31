@@ -89,7 +89,6 @@ def parse_query_args(query: str):
     parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
     parser.add_argument("-path", type=Path, default=None, help="Destination path")
     parser.add_argument("-compress", type=str_to_bool_caster, default=False, help="Compression flag")
-    parser.add_argument("-tablename", action='append', help="Table name (repeatable)")
     parser.add_argument("-extract", action='store_true', help="Extract SQL result to CSV")
     parser.add_argument("-single-archive", type=str_to_bool_caster, default=True, help="Create single .tar.zst archive")
     try:
@@ -110,7 +109,7 @@ class SQLCompleter(Completer):
         'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN',
         'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'DISTINCT',
     ]
-    commands = ['help', 'exit', 'quit', 'full database', 'full tables', 'differential backup', 'SQL', '-path', '-tablename', '-extract']
+    commands = ['help', 'exit', 'quit', 'full database', 'differential backup', 'SQL', '-path', '-extract']
 
     def get_completions(self, document, complete_event):
         word_before_cursor = document.get_word_before_cursor()
@@ -126,7 +125,12 @@ class SQLCompleter(Completer):
 
 
 
-async def interactive_console(db_client: Union[PostgresClient, MysqlClient], dbname: str, user: str):
+async def interactive_console(
+    db_client: Union[PostgresClient, MysqlClient],
+    dbname: str,
+    user: str,
+    initial_storage_type: str | None = None,
+):
     
     messenger = get_messenger()
     
@@ -134,7 +138,15 @@ async def interactive_console(db_client: Union[PostgresClient, MysqlClient], dbn
     messenger.info("Database Backup Utility - Initial Configuration")
     print()
     
-    storage_type = await select_storage_type()
+    if initial_storage_type == StorageType.LOCAL.value:
+        storage_type = StorageType.LOCAL
+    elif initial_storage_type == "cloud":
+        messenger.warning(
+            "Cloud storage is not yet implemented. Defaulting to Local Filesystem."
+        )
+        storage_type = StorageType.LOCAL
+    else:
+        storage_type = await select_storage_type()
     
     messenger.success(f"✓ Storage configured: {storage_type.value}")
     

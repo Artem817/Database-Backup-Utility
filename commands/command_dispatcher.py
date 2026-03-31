@@ -12,7 +12,6 @@ class CommandDispatcher:
         
         command_mapping = {
             "full database": "full_backup",
-            "full tables": "partial_backup", 
             "differential backup": "differential_backup",
             "help": "help"
         }
@@ -27,7 +26,7 @@ class CommandDispatcher:
         if mapped_command not in self.commands:
             raise ValueError(f"Command '{command_name}' not recognized.")
         
-        if mapped_command in ["full_backup", "partial_backup", "differential_backup"]:
+        if mapped_command in ["full_backup", "differential_backup"]:
             parsed_args.storage_type = self.storage_type
             
         return self.execute_command(mapped_command, parsed_args)

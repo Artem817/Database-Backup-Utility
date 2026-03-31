@@ -26,6 +26,7 @@ class MysqlClient(ConnectionConfigMixin,
     def __init__(self, host, database, user, password, **kwargs):
         if 'port' not in kwargs:
             kwargs['port'] = 3306
+        self._database_engine = "mysql"
         
         login_path = kwargs.pop('login_path', None)
         socket = kwargs.pop('socket', None)
@@ -176,6 +177,18 @@ class MysqlClient(ConnectionConfigMixin,
         from services.execution.executor import QueryExecutor
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
+
+    def extract_sql_query(self, query: str, outpath):
+        from services.execution.executor import QueryExecutor
+        from services.execution.exporter import QueryResultExporter
+
+        query_executor = QueryExecutor(self, self._logger, self._messenger)
+        query_result_exporter = QueryResultExporter(
+            self._logger, self._messenger, self._database
+        )
+        return query_executor.extract_sql_query(
+            query, outpath, query_result_exporter
+        )
         
     @check_utility_available("xtrabackup")
     def backup_full(self, outpath: str, single_archive: bool = True, storage: str = "local") -> bool:
@@ -186,6 +199,7 @@ class MysqlClient(ConnectionConfigMixin,
         metadata = self._logger.start_backup(
             backup_type="full",
             database=self._database,
+            database_type=self._database_engine,
             database_version=self._database_version or "Unknown",
             utility_version="xtrabackup",
             compress=True,
