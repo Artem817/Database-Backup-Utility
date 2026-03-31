@@ -1,15 +1,15 @@
 from typing import Any
-from custom_logging import BackupLogger, BackupCatalog
+from custom_logging import BackupLogger
 from services.backup.core import DifferentialBackupService
 from services.backup.metadata import BackupMetadataReader
-from services.backup.differential.starategy.postgres_strategy import PostgresDifferentialBackupStrategy
-from services.backup.differential.starategy.mysql_strategy import MySQLDifferentialBackupStrategy
+from services.backup.differential.strategy.postgres_strategy import PostgresDifferentialBackupStrategy
+from services.backup.differential.strategy.mysql_strategy import MySQLDifferentialBackupStrategy
 
 
 class DifferentialBackupMixin:
     """
-    Provides methods for incremental backup (WAL-based).
-    Automatically selects a strategy based on the database (port) type.
+    Provides methods for differential backup.
+    Automatically selects a strategy based on the database engine.
     
     PostgreSQL: WAL-based differential backup
     MySQL: xtrabackup --incremental
@@ -21,11 +21,18 @@ class DifferentialBackupMixin:
 
     def perform_differential_backup(self, metadata_reader: BackupMetadataReader):
         """Performs differential backup using appropriate strategy for database type"""
-        
-        if self._port == 3306:  # MySQL
+        database_engine = getattr(self, "database_engine", None) or getattr(
+            self, "_database_engine", None
+        )
+
+        if database_engine == "mysql":
             strategy = MySQLDifferentialBackupStrategy(self, self._logger, self._messenger)
-        else:  # PostgreSQL (5432)
+        elif database_engine == "postgresql":
             strategy = PostgresDifferentialBackupStrategy(self, self._logger, self._messenger)
+        else:
+            raise ValueError(
+                f"Unsupported database engine for differential backup: {database_engine}"
+            )
         
         diff_service = DifferentialBackupService(self, self._logger, self._messenger, strategy)
         

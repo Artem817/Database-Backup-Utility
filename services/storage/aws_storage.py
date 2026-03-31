@@ -1,5 +1,4 @@
 
-
-#TODO: Implement AWS S3 storage service
 class AWS_S3:
-    pass
+    def upload(self, *args, **kwargs):
+        raise NotImplementedError("S3 storage is planned for Phase B")

@@ -14,7 +14,8 @@ class BackupCatalogMixin:
 
     def get_last_backup_path(self) -> str | None:
         catalog = BackupCatalog()
-        return catalog.get_last_backup().get("backup_location") if catalog.get_last_backup() else None
+        last_backup = catalog.get_last_successful_backup()
+        return last_backup.get("backup_location") if last_backup else None
 
     def print_backup_history(self, limit: int = 10):
         catalog = BackupCatalog()

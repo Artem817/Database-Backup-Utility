@@ -2,30 +2,33 @@
 
 [![Status: Suspended](https://www.repostatus.org/badges/latest/suspended.svg)](https://www.repostatus.org/#suspended)
 
-A database backup utility implementing native physical backup methods with WAL-based archiving for PostgreSQL and MySQL. This project is currently in active development and should be considered experimental.
+A database backup utility implementing native physical backup methods for PostgreSQL and MySQL, with WAL-based differential backups for PostgreSQL and `xtrabackup`-based differential backups for MySQL. The repository is experimental and development is currently paused.
 
 ## Current Implementation Status
 
 **Working Features:**
 - PostgreSQL full backup using `pg_basebackup` with WAL streaming
-- PostgreSQL WAL archiving for Point-in-Time Recovery (PITR)
+- PostgreSQL differential backup by collecting archived WAL files from a configured `archive_directory`
+- Basic PostgreSQL WAL validation (sequence gaps, timeline consistency, file sanity checks)
 - MySQL full backup using `xtrabackup` (Percona XtraBackup)
+- MySQL differential backup command implemented via `xtrabackup --incremental` against the last full backup
 - **Encrypted credential profiles (MySQL login-path, PostgreSQL .pgpass)**
-- Backup catalog tracking
+- Backup catalog tracking and per-backup metadata
+- Optional single `.tar.zst` archive creation for full backups when `zstd` is available
 
 **Not Yet Implemented:**
-- MySQL incremental backups based on LSN
 - Automated restore functionality
 - Point-in-Time Recovery (PITR) restore interface
-- Cloud storage integration
-- Backup verification
+- Cloud storage integration (CLI placeholders exist, upload implementation does not)
+- End-to-end backup verification / automated test-restore workflow
 - Production-grade error handling
+- Stable user-facing PostgreSQL incremental backup workflow
 
 **Known Issues:**
-- Direct filesystem access required for WAL archiving
+- Direct filesystem access is required for MySQL physical backups and PostgreSQL archived WAL access
 - Limited testing across different PostgreSQL/MySQL versions
 - No automated cleanup of old backups
-- Chain integrity not validated
+- WAL validation is basic only; there is no full restore verification
 - Timezone handling inconsistencies
 
 This utility is a work in progress and **not recommended for production use** at this time.
@@ -36,23 +39,24 @@ The utility uses native database backup tools instead of SQL dumps:
 
 **PostgreSQL:**
 - Full backup: `pg_basebackup` with tar format and gzip compression
-- WAL archiving: Continuous archiving from `pg_wal` directory for PITR
+- Differential backup: copies archived WAL files from a configured `archive_directory`
 - **WAL chain validation** (sequence gaps, timeline consistency, file integrity — **basic**)
-- Requires REPLICATION privilege and `wal_level = replica`
+- Requires REPLICATION privilege, `wal_level = replica`, and access to the configured WAL archive directory
 
 **MySQL:**
 - Full backup: `xtrabackup` physical backup with compression
-- Incremental backup: Not yet implemented (planned: xtrabackup incremental based on LSN)
-- Requires Percona XtraBackup installed
+- Differential backup command: `xtrabackup --incremental --incremental-basedir=<last full backup>`
+- Requires Percona XtraBackup installed and access to the MySQL data directory
 
 ## Requirements
 
 - Python 3.10 or higher
 - PostgreSQL client tools (pg_basebackup)
 - MySQL: Percona XtraBackup 8.0
+- Optional: `zstd` and `tar` for single-file `.tar.zst` archives
 - User permissions:
   - PostgreSQL: REPLICATION privilege
-  - PostgreSQL: Read access to `pg_wal` directory for WAL archiving
+  - PostgreSQL: Access to the configured WAL archive directory
   - MySQL: Standard backup privileges + read access to data directory
 
 ## Installation
@@ -127,11 +131,7 @@ python cli/dbtool.py backup --db mysql --database mydb \
 
 ### 2. Environment File Configuration (.env)
 
-Traditional method using `.env` file:
-
-```bash
-cp .env.example .env
-```
+Traditional method using a local `.env` file. Create it manually in the project root (an `.env.example` template is not currently committed).
 
 Configure `.env` with your database credentials:
 
@@ -178,7 +178,15 @@ Ensure `wal_level` is set correctly in `postgresql.conf`:
 wal_level = replica
 ```
 
+Configure WAL archiving so PostgreSQL copies segments into an archive directory:
+```
+archive_mode = on
+archive_command = 'cp %p /path/to/archive/%f'
+```
+
 Restart PostgreSQL after configuration changes.
+
+On first PostgreSQL run, the utility asks you to confirm or save that `archive_directory` in `~/.backup_utility/config.json`.
 
 ## MySQL Setup
 
@@ -205,8 +213,8 @@ xtrabackup --version
 Operations that require direct filesystem access need elevated privileges:
 
 **Operations requiring sudo/elevated permissions:**
-- MySQL `xtrabackup` full backup (reads from `/usr/local/mysql/data/` or `/var/lib/mysql/`)
-- PostgreSQL WAL archiving (reads from `/var/lib/postgresql/data/pg_wal/`)
+- MySQL `xtrabackup` full or differential backup (reads MySQL data files)
+- PostgreSQL differential backup when the configured WAL archive directory is protected by OS permissions
 
 **Operations NOT requiring sudo:**
 - PostgreSQL `pg_basebackup` full backup (uses replication protocol)
@@ -218,7 +226,7 @@ Operations that require direct filesystem access need elevated privileges:
 # MySQL full backup (requires sudo)
 sudo python cli/dbtool.py backup --db mysql --database mydb --storage local --config profile
 
-# PostgreSQL WAL archiving (requires sudo or postgres user)
+# PostgreSQL differential backup (may require sudo or postgres user)
 sudo python cli/dbtool.py backup --db postgres --database mydb --storage local --config profile
 
 # PostgreSQL full backup (no sudo needed - uses replication protocol)
@@ -231,7 +239,7 @@ python cli/dbtool.py backup --db postgres --database mydb --storage local --conf
 
 **Alternative to sudo:**
 - Run as database user: `sudo -u postgres python cli/dbtool.py ...` or `sudo -u mysql python cli/dbtool.py ...`
-- Grant read permissions to data directories (one-time setup)
+- Grant read permissions to the MySQL data directory / configured PostgreSQL archive directory (one-time setup)
 
 **Security Note:** When using `sudo` with encrypted profile configuration, credentials remain secure and are never exposed in process lists.
 
@@ -243,7 +251,9 @@ python cli/dbtool.py backup --db postgres --database mydb --storage local --conf
 # Full database backup
 full database -path /path/to/backups
 
-# WAL archiving (PostgreSQL only - for PITR)
+# Differential backup
+# PostgreSQL: archived WAL copy with basic validation
+# MySQL: xtrabackup incremental from the last full backup
 differential backup
 
 # Execute SQL query
@@ -261,74 +271,71 @@ exit
 
 ## Backup Structure
 
-Backups are organized by database name:
+Backups are created directly under the path passed to `full database -path ...`. Differential backups are created as sibling directories next to the last full backup. Exact contents depend on the database type:
 
 ```
 /backups/
-└── DatabaseName/
-    ├── full_DatabaseName_20251105_150000_a1b2/
-    │   ├── base.tar.gz              # Database files
-    │   ├── pg_wal.tar.gz            # WAL segments at backup time
-    │   ├── backup_manifest          # PostgreSQL 13+ manifest
-    │   ├── metadata.json            # Backup metadata
-    │   └── wal_archives/            # WAL archiving directory
-    │       ├── chain.json           # PITR restore chain
-    │       ├── archive_20251105_160000_c3d4/
-    │       │   ├── wal_files/
-    │       │   │   └── *.gz         # Archived WAL segments
-    │       │   └── metadata.json
-    │       └── archive_20251105_170000_e5f6/
-    │           └── ...
-    └── full_DatabaseName_20251106_100000_x9y8/
-        └── ...
+├── full_mydb_20251105_150000_a1b2/
+│   ├── metadata.json
+│   ├── base.tar.gz                  # PostgreSQL full backup
+│   ├── pg_wal.tar.gz                # PostgreSQL WAL at backup time
+│   ├── backup_manifest              # PostgreSQL 13+, optional
+│   ├── xtrabackup_checkpoints       # MySQL full backup metadata
+│   └── ...
+├── full_mydb_20251105_150000_a1b2.tar.zst  # Optional single archive
+└── differential_mydb_20251105_160000_c3d4/
+    ├── base_backup_id.txt
+    ├── metadata.json
+    ├── 0000000100000000000000A1     # PostgreSQL archived WAL files
+    ├── xtrabackup_checkpoints       # MySQL differential backup metadata
+    └── ...
 ```
 
-Each full backup contains:
-- Complete database snapshot
-- WAL files at backup time
-- Metadata with backup details
-- WAL archives directory for continuous archiving (PITR)
+Other on-disk artifacts:
+- `backup_catalog.json` stores backup history across runs
+- `backup_<database>.log` stores per-database logs
 
 ## Limitations
 
 **Current Limitations:**
 - No partial/table-level backups (full database only)
-- PostgreSQL WAL archiving requires direct filesystem access to `pg_wal` directory
+- PostgreSQL differential backup depends on a preconfigured WAL archive directory
 - No automated restore scripts
-- No backup validation or integrity checking
+- No end-to-end restore verification; only basic WAL validation for the PostgreSQL differential flow
 - No retention policy management
-- Single-threaded operations
+- No background scheduling or orchestration; most operations are still sequential
 - Limited error recovery
 
 **PostgreSQL:**
-- WAL archiving requires running as postgres user or equivalent permissions
-- WAL archiving depends on filesystem access to `pg_wal`
+- Differential backup may require running as `postgres` user or equivalent permissions
+- Differential backup depends on filesystem access to the configured WAL archive directory
 - PITR restore interface not yet implemented
 
 **MySQL:**
-- Only full backups currently working
-- Incremental backups planned but not implemented
+- Full backups and differential backups are implemented
+- Differential backup is based on `xtrabackup --incremental` against the last full backup
 - Requires xtrabackup prepare step before restore (manual)
 
 ## Development Status
 
-This project is under active development. Current focus:
+This project is currently paused. Current follow-up areas if development resumes:
 
-- Implementing MySQL incremental backups using xtrabackup LSN-based incremental
+- Hardening the MySQL differential / incremental-from-full workflow
 - Adding PITR restore interface for PostgreSQL
 - Improving error handling and validation
 - Adding automated restore functionality
 - Testing across more database versions
 - Improving documentation
+- Deciding whether to expose the experimental PostgreSQL incremental/WAL pipeline code currently living under `services/backup/incremential/` and `services/wal/`
 
 ## Troubleshooting
 
-**PostgreSQL WAL archiving fails with permission denied:**
+**PostgreSQL differential backup fails with permission denied:**
 
-WAL archiving needs read access to the PostgreSQL `pg_wal` directory. Options:
+The differential flow needs read access to the configured PostgreSQL archive directory. Options:
 - Run as the postgres user: `sudo -u postgres python cli/dbtool.py ...`
 - Run with sudo: `sudo python cli/dbtool.py ...`
-- Grant read permissions to `pg_wal` directory (security consideration required)
+- Grant read permissions to the configured archive directory (security consideration required)
 
 **MySQL xtrabackup fails with permission denied:**
 
@@ -361,17 +368,17 @@ Install Percona XtraBackup as shown in the MySQL Setup section.
 
 ## Contributing
 
-This project is in early development. Contributions are welcome, particularly:
+This project is experimental. Contributions are welcome, particularly:
 
 - Testing on different PostgreSQL/MySQL versions
-- Implementing MySQL incremental backups
+- Hardening MySQL differential / incremental-from-full backups
 - Implementing PITR restore interface
 - Automated restore functionality
 - Backup verification tools
 - Error handling improvements
 - Documentation
 
-Please note that the codebase is actively changing and APIs may not be stable.
+Please note that APIs and project structure may change if development resumes.
 
 ## License
 

@@ -27,6 +27,7 @@ class PostgresClient(ConnectionConfigMixin,
     def __init__(self, host: str, database: str, user: str, password: str, **kwargs: Any) -> None:
         if 'port' not in kwargs:
             kwargs['port'] = 5432
+        self._database_engine = "postgresql"
         
         self._use_pgpass = kwargs.pop('use_pgpass', False)
         
@@ -60,10 +61,20 @@ class PostgresClient(ConnectionConfigMixin,
 
     def connect(self) -> Optional[connection]:
         try:
-            self._connection = psycopg2.connect(
-                dbname=self._database, user=self._user, host=self._host,
-                password=self._password, port=self._port, connect_timeout=10
-            )
+            connect_kwargs = {
+                "dbname": self._database,
+                "user": self._user,
+                "host": self._host,
+                "port": self._port,
+                "connect_timeout": 10,
+            }
+
+            # When .pgpass is enabled, do not pass an explicit password so libpq
+            # can resolve credentials from ~/.pgpass.
+            if not self._use_pgpass and self._password:
+                connect_kwargs["password"] = self._password
+
+            self._connection = psycopg2.connect(**connect_kwargs)
             with self._connection.cursor() as cur:
                 cur.execute("SELECT version();")
                 
@@ -152,6 +163,19 @@ class PostgresClient(ConnectionConfigMixin,
         from services.execution.executor import QueryExecutor
         query_executor = QueryExecutor(self, self._logger, self._messenger)
         return query_executor.execute_query(query)
+
+    @not_none('query')
+    def extract_sql_query(self, query: str, outpath):
+        from services.execution.executor import QueryExecutor
+        from services.execution.exporter import QueryResultExporter
+
+        query_executor = QueryExecutor(self, self._logger, self._messenger)
+        query_result_exporter = QueryResultExporter(
+            self._logger, self._messenger, self._database
+        )
+        return query_executor.extract_sql_query(
+            query, outpath, query_result_exporter
+        )
     
     @_check_archive_mode
     @_check_wal_level
@@ -165,6 +189,7 @@ class PostgresClient(ConnectionConfigMixin,
         metadata = self._logger.start_backup(
             backup_type="full",
             database=self._database,
+            database_type=self._database_engine,
             database_version=self._database_version or "Unknown",
             utility_version="pg_basebackup",
             compress=True,
@@ -281,7 +306,5 @@ class PostgresClient(ConnectionConfigMixin,
             self._logger.error(f"Backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
-
-
 
 

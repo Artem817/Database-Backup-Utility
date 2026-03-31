@@ -14,7 +14,13 @@ class DatabaseClient(ABC):
         pass
 
     @abstractmethod
-    def backup_full(self, outpath: str, single_archive: bool = True) -> bool:
+    def extract_sql_query(self, query, outpath):
+        pass
+
+    @abstractmethod
+    def backup_full(
+        self, outpath: str, single_archive: bool = True, storage: str = "local"
+    ) -> bool:
         """Create full database backup with zstd compression"""
         pass
 
@@ -35,6 +41,11 @@ class DatabaseClient(ABC):
     @property
     @abstractmethod
     def connection_params(self):
+        pass
+
+    @property
+    @abstractmethod
+    def database_engine(self):
         pass
 
     @property
