@@ -219,7 +219,7 @@ def validate_profile_config(args, parser):
     messenger = get_messenger()
     dbname = args.database
     
-    messenger.section_header("🔐 Secure Profile Configuration")
+    messenger.section_header("Secure Profile Configuration")
     
     if args.db == "mysql":
         default_login_path = "xtrabackup"
