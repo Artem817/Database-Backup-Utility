@@ -10,8 +10,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from clients.postgres_client import PostgresClient
 from clients.mysql_client import MysqlClient  
 from cli.interaction import interactive_console
+from cli.postgres_wal_config import PostgresWalArchiveConfig
 from cli.validateconfig import validate_config
 from console_utils import get_messenger, configure_messenger
+from custom_logging import BackupLogger
+from services.restore.postgres_restore import PostgresRestoreService
 
 EXIT_FAILURE = 1
 
@@ -32,12 +35,17 @@ Examples:
   # Using manual configuration
   python cli/dbtool.py backup --db postgres --database testdb --storage local --config manual \\
     --host localhost --port 5432 --user admin --password secret
+
+  # PostgreSQL restore from a full backup directory
+  python cli/dbtool.py restore --db postgres --database postgres \\
+    --backup-path /backups/full_pg_20260427_120000_abcd \\
+    --data-dir /tmp/postgres-restore --archive-dir /tmp/pg_archive
     """
 )
 
 parser.add_argument(
     "command", 
-    choices=["backup"], 
+    choices=["backup", "restore"], 
     help="Command to execute"
 )
 
@@ -56,14 +64,12 @@ parser.add_argument(
 
 parser.add_argument(
     "--storage", 
-    required=True, 
     choices=["local", "cloud"], 
     help="Storage type (currently only local is implemented)"
 )
 
 parser.add_argument(
     "--config", 
-    required=True, 
     choices=["manual", "file", "profile"], 
     help="Configuration source: 'manual' for CLI args, 'file' for .env, 'profile' for encrypted login-path"
 )
@@ -72,6 +78,29 @@ parser.add_argument("--host", help="Database host address")
 parser.add_argument("--port", help="Database port (default: 5432 for postgres)")
 parser.add_argument("--user", help="Database username")
 parser.add_argument("--password", help="Database password")
+parser.add_argument("--backup-path", help="PostgreSQL full backup directory or .tar.zst archive to restore")
+parser.add_argument("--data-dir", help="New PostgreSQL data directory for restore")
+parser.add_argument("--archive-dir", help="Path to archived WAL files for PostgreSQL restore")
+parser.add_argument(
+    "--restore-port",
+    type=int,
+    default=55432,
+    help="Port for the restored PostgreSQL instance (default: 55432)"
+)
+parser.add_argument(
+    "--verify-user",
+    default="postgres",
+    help="Database user for post-restore SELECT verification (default: postgres)"
+)
+parser.add_argument(
+    "--verify-query",
+    default="SELECT 1;",
+    help="SQL query used to verify the restored instance (default: SELECT 1;)"
+)
+parser.add_argument(
+    "--pg-bin-dir",
+    help="Directory containing pg_ctl and psql when PostgreSQL binaries are not in PATH"
+)
 
 parser.add_argument(
     "--single-archive",
@@ -86,6 +115,55 @@ db_client = None
 messenger = get_messenger()
 
 try:
+    if args.command == "restore":
+        if args.db != "postgres":
+            parser.error("Restore is currently implemented only for --db postgres")
+        if not args.backup_path:
+            parser.error("--backup-path is required for restore")
+        if not args.data_dir:
+            parser.error("--data-dir is required for restore")
+
+        restore_logger = BackupLogger(
+            name=f"restore_{args.database}",
+            log_file=f"restore_{args.database}.log"
+        )
+        configure_messenger(logger=restore_logger.logger, enable_colors=True)
+        messenger = get_messenger()
+
+        archive_dir = args.archive_dir
+        if not archive_dir:
+            archive_dir = PostgresWalArchiveConfig().get_archive_directory()
+            if archive_dir:
+                messenger.info(f"Using saved WAL archive directory: {archive_dir}")
+
+        if not archive_dir:
+            parser.error(
+                "--archive-dir is required for restore when no saved PostgreSQL WAL archive directory exists"
+            )
+
+        restore_service = PostgresRestoreService(
+            backup_path=args.backup_path,
+            data_dir=args.data_dir,
+            archive_dir=archive_dir,
+            restore_port=args.restore_port,
+            verify_database=args.database,
+            verify_user=args.verify_user,
+            verify_query=args.verify_query,
+            pg_bin_dir=args.pg_bin_dir,
+            logger=restore_logger,
+            messenger=messenger,
+        )
+
+        if not restore_service.restore():
+            sys.exit(EXIT_FAILURE)
+
+        sys.exit(0)
+
+    if not args.storage:
+        parser.error("--storage is required for backup")
+    if not args.config:
+        parser.error("--config is required for backup")
+
     config = validate_config(args, parser)
     
     config_type = config.get('type')

@@ -14,7 +14,7 @@ class BackupCatalogMixin:
 
     def get_last_backup_path(self) -> str | None:
         catalog = BackupCatalog()
-        last_backup = catalog.get_last_successful_backup()
+        last_backup = catalog.get_last_successful_backup(database_name=self._database)
         return last_backup.get("backup_location") if last_backup else None
 
     def print_backup_history(self, limit: int = 10):
@@ -42,6 +42,11 @@ class BackupCatalogMixin:
         catalog = BackupCatalog()
         metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
         return metadata_reader.get_output_path_from_last_full_backup()
+
+    def get_latest_backup_chain(self) -> list[dict]:
+        catalog = BackupCatalog()
+        metadata_reader = BackupMetadataReader(catalog, self._messenger, self._logger, self._database)
+        return metadata_reader.get_latest_backup_chain()
 
     def _create_backup_structure(self, base_path: Path, backup_id: str, back_up_time: str) -> dict:
         """
