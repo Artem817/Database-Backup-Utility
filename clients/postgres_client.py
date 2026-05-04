@@ -14,7 +14,6 @@ from decorators.types_decorators import not_none
 import subprocess
 from decorators.replication_privilege import _check_archive_mode, requires_replication_privilege, _check_wal_level
 from decorators.check_basebackup_decorator import check_basebackup
-import json
 from services.backup.archive_utils import create_single_archive
 from cli.postgres_wal_config import PostgresWalArchiveConfig
 
@@ -201,6 +200,7 @@ class PostgresClient(ConnectionConfigMixin,
         
         backup_dir = base_path / backup_id
         backup_dir.mkdir(parents=True, exist_ok=True)
+        metadata["backup_location"] = str(backup_dir)
         
         pg_basebackup_cmd = [
             "pg_basebackup",
@@ -252,6 +252,8 @@ class PostgresClient(ConnectionConfigMixin,
             
             base_tar = backup_dir / "base.tar.gz"
             wal_tar = backup_dir / "pg_wal.tar.gz"
+            metadata["base_tar_path"] = str(base_tar)
+            metadata["wal_tar_path"] = str(wal_tar) if wal_tar.exists() else ""
             
             if not base_tar.exists():
                 self._messenger.error("base.tar.gz not found - backup may be incomplete")
@@ -268,6 +270,13 @@ class PostgresClient(ConnectionConfigMixin,
             else:
                 self._messenger.warning("Backup manifest not found (PostgreSQL < 13)")
                 metadata["backup_manifest_path"] = ""
+
+            if self._connection and not self._connection.closed:
+                with self._connection.cursor() as cur:
+                    cur.execute("SELECT pg_current_wal_lsn();")
+                    metadata["current_lsn"] = cur.fetchone()[0]
+                    cur.execute("SELECT pg_walfile_name(pg_current_wal_lsn());")
+                    metadata["current_wal_file"] = cur.fetchone()[0]
             
             total_size = sum(f.stat().st_size for f in backup_dir.rglob('*') if f.is_file())
             
@@ -277,15 +286,9 @@ class PostgresClient(ConnectionConfigMixin,
             self._logger.info(f"Full backup directory: {backup_dir}")
             self._logger.info(f"Backup size: {total_size} bytes")
             
-            metadata["backup_location"] = str(backup_dir)
             metadata["backup_size_bytes"] = total_size
             metadata["wal_archived"] = True
             metadata["backup_format"] = "tar+gzip"
-            
-            metadata_file = backup_dir / "metadata.json"
-            with open(metadata_file, 'w') as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False, default=str)
-            self._messenger.info(f"Metadata saved: {metadata_file}")
             
             if single_archive:
                 self._messenger.section_header("Creating Single Archive (zstd)")
@@ -306,5 +309,4 @@ class PostgresClient(ConnectionConfigMixin,
             self._logger.error(f"Backup failed: {e}")
             self._logger.finish_backup(metadata, success=False)
             return False
-
 

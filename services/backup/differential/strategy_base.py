@@ -63,7 +63,5 @@ class DifferentialBackupStrategyBase(IDifferentialBackupStrategy):
 
         metadata.setdefault("backup_location", str(output_dir))
         metadata.setdefault("backup_size_bytes", self._calculate_dir_size(output_dir))
-
-        self.write_metadata_file(metadata, output_dir)
         self._logger.finish_backup(metadata, success=success)
         return success

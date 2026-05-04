@@ -8,20 +8,23 @@ class CommandDispatcher:
         
     def dispatch(self, command_name: str, parsed_args):
         """Dispatch command with parsed arguments"""
-        command_name = command_name.lower()
+        command_name = command_name.strip()
+        normalized_command = command_name.lower()
         
         command_mapping = {
             "full database": "full_backup",
             "differential backup": "differential_backup",
+            "restore": "restore_postgres",
+            "restore database": "restore_postgres",
             "help": "help"
         }
         
-        if command_name.startswith("sql "):
+        if normalized_command.startswith("sql "):
             mapped_command = "execute_sql"
-            sql_query = command_name[4:].strip() 
+            sql_query = command_name[4:].strip()
             return self.execute_command(mapped_command, sql_query, parsed_args)
         
-        mapped_command = command_mapping.get(command_name, command_name)
+        mapped_command = command_mapping.get(normalized_command, normalized_command)
         
         if mapped_command not in self.commands:
             raise ValueError(f"Command '{command_name}' not recognized.")

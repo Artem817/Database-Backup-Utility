@@ -1,5 +1,6 @@
 from custom_logging import BackupCatalog
 from services.backup.metadata import BackupMetadataReader
+from services.restore.postgres_restore import PostgresRestoreService
 
 class BackupService:
     def __init__(self, dbclient) -> None:
@@ -25,6 +26,51 @@ class BackupService:
         )
         
         self.dbclient.perform_differential_backup(metadata_reader)
+
+    def restore_postgres(self, parsed_args) -> None:
+        """Handle minimal PostgreSQL restore from the interactive console"""
+        if getattr(self.dbclient, "database_engine", None) != "postgresql":
+            raise ValueError("Restore command is currently implemented only for PostgreSQL")
+
+        backup_path = parsed_args.backup_path or parsed_args.path
+        if not backup_path:
+            raise ValueError(
+                "Backup path is required. Use: restore -path <full_backup_dir_or_archive> "
+                "-data-dir <new_data_dir> [-wal-path <wal_archive_dir>]"
+            )
+
+        if not parsed_args.data_dir:
+            raise ValueError(
+                "Data directory is required. Use: restore -path <full_backup_dir_or_archive> "
+                "-data-dir <new_data_dir> [-wal-path <wal_archive_dir>]"
+            )
+
+        wal_archive_path = (
+            parsed_args.wal_path
+            or parsed_args.archive_dir
+            or getattr(self.dbclient, "archive_path", None)
+        )
+        if not wal_archive_path:
+            raise ValueError(
+                "WAL archive directory is required. Pass -wal-path <archive_dir> "
+                "or configure archive_directory for PostgreSQL first."
+            )
+
+        restore_service = PostgresRestoreService(
+            backup_path=str(backup_path),
+            data_dir=str(parsed_args.data_dir),
+            archive_dir=str(wal_archive_path),
+            restore_port=parsed_args.restore_port,
+            verify_database=self.dbclient.database_name,
+            verify_user=parsed_args.verify_user or self.dbclient.connection_params.get("user") or "postgres",
+            verify_query=parsed_args.verify_query,
+            pg_bin_dir=str(parsed_args.pg_bin_dir) if parsed_args.pg_bin_dir else None,
+            logger=self.dbclient._logger,
+            messenger=self.dbclient._messenger,
+        )
+
+        if not restore_service.restore():
+            raise RuntimeError("PostgreSQL restore failed")
     
     def execute_sql(self, sql_query, parsed_args) -> None:
         """Handle SQL execution"""

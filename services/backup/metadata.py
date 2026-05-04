@@ -10,27 +10,17 @@ class BackupMetadataReader:
         self._logger = logger
 
     def _get_backups(self):
-        return self._catalog.catalog.get("backups", [])
+        return self._catalog.list_backups(database_name=self._database)
     
     def _get_last_full_backup_info(
         self, info_type: str
     ) -> datetime | str | list[str] | None:
         self._messenger.info(f"Fetching last full backup info for type: {info_type}")
         backups = self._get_backups()
-        
+
         self._messenger.info(f"Total backups found: {len(backups)}")
-        full_backups = [
-            backup for backup in backups
-            if backup.get("database_name") == self._database
-            and backup.get("type") == "full"
-            and backup.get("status") == "completed"
-        ]
-        self._messenger.info(
-            f"Completed full backups for database '{self._database}': {len(full_backups)}"
-        )
-        sorted_backups = sorted(full_backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
-        if sorted_backups:
-            last_backup = sorted_backups[0]
+        last_backup = self._catalog.get_last_full_backup(database_name=self._database)
+        if last_backup:
             self._messenger.info(f"Last full backup found: {last_backup['id']}")
             if info_type == "timestamp":
                 ts = last_backup.get("timestamp_start")
@@ -64,24 +54,29 @@ class BackupMetadataReader:
         return self._get_last_full_backup_info("backup_diff_path")
 
     def get_successful_backup(self) -> dict | None:
-        backups = [
-            backup
-            for backup in self._get_backups()
-            if backup.get("database_name") == self._database
-            and backup.get("status") == "completed"
-        ]
-        if not backups:
+        successful_backup = self._catalog.get_last_successful_backup(database_name=self._database)
+        if not successful_backup:
             self._messenger.warning("No successful backups found.")
             return None
 
-        successful_backup = max(backups, key=lambda b: b.get("timestamp_start", ""))
         self._messenger.info(f"Last successful backup found: {successful_backup['id']}")
         return successful_backup
+
+    def get_backup_chain(self, backup_id: str) -> list[dict]:
+        chain = self._catalog.get_backup_chain(backup_id)
+        if not chain:
+            self._messenger.warning(f"No backup chain found for backup id: {backup_id}")
+            return []
+        return chain
+
+    def get_latest_backup_chain(self) -> list[dict]:
+        latest = self.get_successful_backup()
+        if not latest:
+            return []
+        return self.get_backup_chain(latest["id"])
     
     def get_backup_history(self, limit: int = 10) -> list:
-        backups = self._get_backups()
-        sorted_backups = sorted(backups, key=lambda b: b.get("timestamp_start", ""), reverse=True)
-        return sorted_backups[:limit]
+        return self._catalog.list_backups(database_name=self._database, limit=limit)
 
 class BackupHistoryService:
     def __init__(self, metadata_reader, messenger: IMessenger):

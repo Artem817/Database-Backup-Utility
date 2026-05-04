@@ -1,4 +1,5 @@
 import argparse
+import shlex
 from pathlib import Path
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import FileHistory
@@ -87,12 +88,20 @@ def str_to_bool_caster(v):
 def parse_query_args(query: str):
     messenger = get_messenger()
     parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
-    parser.add_argument("-path", type=Path, default=None, help="Destination path")
+    parser.add_argument("-path", type=Path, default=None, help="Backup input/output path")
+    parser.add_argument("-backup-path", type=Path, default=None, help="Path to full backup directory or .tar.zst archive")
+    parser.add_argument("-data-dir", type=Path, default=None, help="New PostgreSQL data directory")
+    parser.add_argument("-wal-path", type=Path, default=None, help="Path to PostgreSQL WAL archive directory")
+    parser.add_argument("-archive-dir", type=Path, default=None, help="Alias for -wal-path")
+    parser.add_argument("-restore-port", type=int, default=55432, help="Port for restored PostgreSQL")
+    parser.add_argument("-verify-user", default=None, help="User for restore verification query")
+    parser.add_argument("-verify-query", default="SELECT 1;", help="SQL query for restore verification")
+    parser.add_argument("-pg-bin-dir", type=Path, default=None, help="Directory with pg_ctl and psql binaries")
     parser.add_argument("-compress", type=str_to_bool_caster, default=False, help="Compression flag")
     parser.add_argument("-extract", action='store_true', help="Extract SQL result to CSV")
     parser.add_argument("-single-archive", type=str_to_bool_caster, default=True, help="Create single .tar.zst archive")
     try:
-        known_args, command_tokens = parser.parse_known_args(query.split())
+        known_args, command_tokens = parser.parse_known_args(shlex.split(query))
         return known_args, command_tokens
     except (SystemExit, argparse.ArgumentError) as e:
         messenger.warning(f"[PARSING ERROR] {e}")
@@ -109,7 +118,28 @@ class SQLCompleter(Completer):
         'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN',
         'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'DISTINCT',
     ]
-    commands = ['help', 'exit', 'quit', 'full database', 'differential backup', 'SQL', '-path', '-extract']
+    commands = [
+        'help',
+        'exit',
+        'quit',
+        'full database',
+        'differential backup',
+        'restore',
+        'restore database',
+        'SQL',
+        '-path',
+        '-backup-path',
+        '-data-dir',
+        '-wal-path',
+        '-archive-dir',
+        '-restore-port',
+        '-verify-user',
+        '-verify-query',
+        '-pg-bin-dir',
+        '-extract',
+        '-compress',
+        '-single-archive',
+    ]
 
     def get_completions(self, document, complete_event):
         word_before_cursor = document.get_word_before_cursor()
@@ -186,9 +216,9 @@ async def interactive_console(
             if parsed_args is None:
                 continue
 
-            command = " ".join(command_tokens).lower()
+            command = " ".join(command_tokens)
 
-            if command in ['exit', 'quit']:
+            if command.lower() in ['exit', 'quit']:
                 messenger.info("Goodbye! 👋")
                 break
             try:

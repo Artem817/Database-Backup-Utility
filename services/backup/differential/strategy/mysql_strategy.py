@@ -46,9 +46,11 @@ class MySQLDifferentialBackupStrategy(DifferentialBackupStrategyBase):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         diff_backup_dir = backup_root_dir / f"differential_{connection_params['database']}_{timestamp}_{metadata['id'].split('_')[-1]}"
         diff_backup_dir.mkdir(parents=True, exist_ok=True)
+        metadata["backup_location"] = str(diff_backup_dir)
         
         base_backup_ref = diff_backup_dir / "base_backup_id.txt"
         base_backup_ref.write_text(full_backup_path.name)
+        metadata["base_backup_reference_path"] = str(base_backup_ref)
         
         try:
             user = str(connection_params.get('user', '')).strip('"').strip("'")
@@ -113,7 +115,6 @@ class MySQLDifferentialBackupStrategy(DifferentialBackupStrategyBase):
             self._messenger.success(f"Differential backup created at {diff_backup_dir}")
             self._messenger.info(f"Backup size: {total_size / (1024**2):.2f} MB")
             
-            metadata["backup_location"] = str(diff_backup_dir)
             metadata["backup_size_bytes"] = total_size
             metadata["parent_backup_location"] = str(full_backup_path)
             metadata["parent_backup_id"] = full_backup_path.name

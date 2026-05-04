@@ -60,9 +60,11 @@ class PostgresDifferentialBackupStrategy(DifferentialBackupStrategyBase):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         diff_backup_dir = backup_root_dir / f"differential_{connection_params['database']}_{timestamp}_{metadata['id'].split('_')[-1]}"
         diff_backup_dir.mkdir(parents=True, exist_ok=True)
+        metadata["backup_location"] = str(diff_backup_dir)
 
         base_backup_ref = diff_backup_dir / "base_backup_id.txt"
         base_backup_ref.write_text(full_backup_path.name)
+        metadata["base_backup_reference_path"] = str(base_backup_ref)
 
         try:
             connection = self._connection_provider.get_connection()

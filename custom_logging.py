@@ -1,10 +1,11 @@
-import json
 import logging
 from logging import getLoggerClass
-import os
 from typing import Any, Dict, Optional
 import uuid
 from datetime import datetime, timezone
+
+from services.backup.catalog import BackupCatalog as SQLiteBackupCatalog
+from services.backup.contracts import BackupContractManager
 
 OriginalLogger = getLoggerClass()
 
@@ -34,7 +35,8 @@ class BackupLogger:
         self.logger.addHandler(file_handler)
         self.logger.addHandler(console_handler)
 
-        self.catalog = BackupCatalog()
+        self.catalog = SQLiteBackupCatalog()
+        self._contract_manager = BackupContractManager(self)
 
     def start_backup(
         self,
@@ -52,10 +54,10 @@ class BackupLogger:
         base_backup_id = None
 
         if backup_type == "incremental":
-            last_backup = self.catalog.get_last_successful_backup()
+            last_backup = self.catalog.get_last_successful_backup(database_name=database)
             parent_backup_id = last_backup.get("id") if last_backup else None
         elif backup_type == "differential":
-            last_full = self.catalog.get_last_full_backup()
+            last_full = self.catalog.get_last_full_backup(database_name=database)
             base_backup_id = last_full.get("id") if last_full else None
         
         metadata = {
@@ -104,6 +106,22 @@ class BackupLogger:
             if isinstance(backup_size, int):
                 metadata["statistics"]["total_size_bytes"] = backup_size
 
+        backup_location = metadata.get("backup_location")
+        if backup_location:
+            try:
+                contract_metadata = self._contract_manager.persist_backup_documents(
+                    metadata=metadata,
+                    output_dir=backup_location,
+                    backup_succeeded=success,
+                )
+                metadata.clear()
+                metadata.update(contract_metadata)
+                success = metadata.get("status") == "completed"
+            except Exception as error:
+                metadata["status"] = "failed"
+                success = False
+                self.logger.error(f"Failed to persist backup contract: {error}", exc_info=True)
+
         self.catalog.add_backup(metadata)
 
         if success:
@@ -134,88 +152,5 @@ class BackupLogger:
     def error(self, message: str) -> None:
         self.logger.error(message)
 
-class BackupCatalog:
-    def __init__(self, path: str = "backup_catalog.json"):
-        if not isinstance(path, str):
-            raise ValueError("The catalog path must be a string.")
-        if not path.endswith(".json"):
-            raise ValueError("The catalog file must be a JSON file.")
-        self.catalog_path = path
-        self.logger = logging.getLogger("BackupCatalog")
-        self.catalog = self.load()
-
-    def load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.catalog_path):
-            self.logger.warning(f"Catalog file not found. Creating a new catalog at {self.catalog_path}.")
-            return {"backups": []}
-        try:
-            with open(self.catalog_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, ValueError) as e:
-            self.logger.error(f"Failed to load catalog file: {e}. Creating a new catalog at {self.catalog_path}.")
-            return {"backups": []}
-
-    def save(self) -> None:
-        if not isinstance(self.catalog, dict):
-            raise ValueError("The catalog must be a dictionary.")
-        with open(self.catalog_path, "w", encoding="utf-8") as f:
-            json.dump(self.catalog, f, indent=4, ensure_ascii=False)
-
-    def add_backup(self, new_backup: Dict[str, Any]) -> None:
-        if not isinstance(new_backup, dict):
-            raise ValueError("The new backup must be a dictionary.")
-        if "backups" not in self.catalog:
-            self.catalog["backups"] = []
-        self.catalog["backups"].append(new_backup)
-        self.save()
-
-    def get_last_backup(self) -> Optional[Dict[str, Any]]:
-        backups = self.catalog.get("backups", [])
-        if not isinstance(backups, list):
-            raise ValueError("The backups must be a list.")
-        if not backups:
-            return None
-        return max(backups, key=lambda b: b.get("timestamp_start", ""))
-
-    def get_last_successful_backup(self) -> Optional[Dict[str, Any]]:
-        backups = self.catalog.get("backups", [])
-        if not isinstance(backups, list):
-            raise ValueError("The backups must be a list.")
-        filtered = [b for b in backups if b.get("status") == "completed"]
-        if not filtered:
-            return None
-        return max(filtered, key=lambda b: b.get("timestamp_start", ""))
-
-    def get_last_backup_id(self) -> Optional[str]:
-        last = self.get_last_backup()
-        return last.get("id") if last else None
-
-    def get_last_backup_by_type(self, backup_type: str) -> Optional[Dict[str, Any]]:
-        if not isinstance(backup_type, str):
-            raise ValueError("The backup type must be a string.")
-        backups = self.catalog.get("backups", [])
-        if not isinstance(backups, list):
-            raise ValueError("The backups must be a list.")
-        filtered = [b for b in backups if b.get("type") == backup_type and b.get("status") == "completed"]
-        if not filtered:
-            return None
-        return max(filtered, key=lambda b: b.get("timestamp_start", ""))
-
-    def get_last_full_backup(self) -> Optional[Dict[str, Any]]:
-        return self.get_last_backup_by_type("full")
-
-    def get_backup_chain(self, backup_id: str) -> list[Dict[str, Any]]:
-        backups = self.catalog.get("backups", [])
-        target = next((b for b in backups if b.get("id") == backup_id), None)
-        if not target:
-            return []
-        chain = [target]
-        current = target
-        while current.get("parent_backup_id") or current.get("base_backup_id"):
-            parent_id = current.get("parent_backup_id") or current.get("base_backup_id")
-            parent = next((b for b in backups if b.get("id") == parent_id), None)
-            if not parent:
-                break
-            chain.insert(0, parent)
-            current = parent
-        return chain
+class BackupCatalog(SQLiteBackupCatalog):
+    pass

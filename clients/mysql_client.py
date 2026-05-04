@@ -211,6 +211,7 @@ class MysqlClient(ConnectionConfigMixin,
         
         backup_dir = base_path / backup_id
         backup_dir.mkdir(parents=True, exist_ok=True)
+        metadata["backup_location"] = str(backup_dir)
         
         if self._login_path:
             xtrabackup_cmd = [
@@ -274,12 +275,12 @@ class MysqlClient(ConnectionConfigMixin,
             self._logger.info(f"Full backup directory: {backup_dir}")
             self._logger.info(f"Backup size: {total_size} bytes")
             
-            metadata["backup_location"] = str(backup_dir)
             metadata["backup_size_bytes"] = total_size
             metadata["backup_checkpoints_path"] = str(checkpoints_file)
             
             binlog_info_file = backup_dir / "xtrabackup_binlog_info"
             if binlog_info_file.exists():
+                metadata["binlog_info_path"] = str(binlog_info_file)
                 with open(binlog_info_file, 'r') as f:
                     binlog_info = f.read().strip()
                     metadata["binlog_info"] = binlog_info

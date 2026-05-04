@@ -5,18 +5,19 @@
 **Working Features:**
 - PostgreSQL full backup using `pg_basebackup` with WAL streaming
 - PostgreSQL differential backup by collecting archived WAL files from a configured `archive_directory`
+- PostgreSQL restore pipeline from full backup + archived WAL replay (`restore_command`, `recovery.signal`, startup, `SELECT 1`)
 - Basic PostgreSQL WAL validation (sequence gaps, timeline consistency, file sanity checks)
 - MySQL full backup using `xtrabackup` (Percona XtraBackup)
 - MySQL differential backup command implemented via `xtrabackup --incremental` against the last full backup
 - **Encrypted credential profiles (MySQL login-path, PostgreSQL .pgpass)**
-- Backup catalog tracking and per-backup metadata
+- SQLite-backed backup catalog tracking and versioned per-backup metadata/validation artifacts
 - Optional single `.tar.zst` archive creation for full backups when `zstd` is available
 
 **Not Yet Implemented:**
-- Automated restore functionality
 - Point-in-Time Recovery (PITR) restore interface
 - Cloud storage integration (CLI placeholders exist, upload implementation does not)
 - End-to-end backup verification / automated test-restore workflow
+- MySQL restore automation
 - Production-grade error handling
 - Stable user-facing PostgreSQL incremental backup workflow
 
@@ -43,6 +44,26 @@ The utility uses native database backup tools instead of SQL dumps:
 - Full backup: `xtrabackup` physical backup with compression
 - Differential backup command: `xtrabackup --incremental --incremental-basedir=<last full backup>`
 - Requires Percona XtraBackup installed and access to the MySQL data directory
+
+## Metadata and Catalog
+
+Backups now use a unified metadata contract and a SQL-backed catalog layer.
+
+- `metadata.json` is versioned and stores normalized backup fields such as `engine`, `backup_type`, `parent_backup_id`, `base_backup_id`, artifact paths, LSN/binlog markers, checksums, manifest/checkpoint pointers, and validation state.
+- `validation.json` is generated alongside `metadata.json` and records schema validation, required artifact presence, marker summary, and recovery status.
+- `backup_catalog.db` is the source of truth for backup history and chain resolution.
+- If `backup_catalog.db` is empty and a legacy `backup_catalog.json` exists, catalog records are imported automatically on first use.
+- Backup chain lookup is now filtered by `database_name`, so parent/base backup resolution does not mix different databases that share the same catalog.
+
+## Validation Model
+
+Each completed backup is persisted through the same contract layer.
+
+- PostgreSQL metadata includes LSN/WAL markers when available.
+- MySQL metadata includes binlog markers when available.
+- Artifact checksums are calculated for key backup files.
+- Required artifacts are validated per engine and backup type before the backup is marked as completed in the catalog.
+- If backup output directory creation succeeded but later stages fail, the backup can still produce formal `metadata.json` / `validation.json` records with failed validation state.
 
 ## Requirements
 
@@ -252,6 +273,9 @@ full database -path /path/to/backups
 # MySQL: xtrabackup incremental from the last full backup
 differential backup
 
+# PostgreSQL restore from interactive console
+restore -path /path/to/full_backup_dir -data-dir /path/to/new_restore_data -wal-path /path/to/archive_directory
+
 # Execute SQL query
 SQL SELECT * FROM users WHERE id < 100
 
@@ -265,6 +289,8 @@ help
 exit
 ```
 
+For PostgreSQL restore, `-wal-path` should point to the WAL archive directory used by `restore_command`, not to a single WAL segment file.
+
 ## Backup Structure
 
 Backups are created directly under the path passed to `full database -path ...`. Differential backups are created as sibling directories next to the last full backup. Exact contents depend on the database type:
@@ -273,6 +299,7 @@ Backups are created directly under the path passed to `full database -path ...`.
 /backups/
 ├── full_mydb_20251105_150000_a1b2/
 │   ├── metadata.json
+│   ├── validation.json
 │   ├── base.tar.gz                  # PostgreSQL full backup
 │   ├── pg_wal.tar.gz                # PostgreSQL WAL at backup time
 │   ├── backup_manifest              # PostgreSQL 13+, optional
@@ -282,21 +309,44 @@ Backups are created directly under the path passed to `full database -path ...`.
 └── differential_mydb_20251105_160000_c3d4/
     ├── base_backup_id.txt
     ├── metadata.json
+    ├── validation.json
     ├── 0000000100000000000000A1     # PostgreSQL archived WAL files
     ├── xtrabackup_checkpoints       # MySQL differential backup metadata
     └── ...
 ```
 
 Other on-disk artifacts:
-- `backup_catalog.json` stores backup history across runs
+- `backup_catalog.db` stores backup history across runs
 - `backup_<database>.log` stores per-database logs
+
+`metadata.json` and `validation.json` are now part of the normal backup contract, not optional diagnostics. Restore and future test-restore logic are expected to consume these files together with `backup_catalog.db`.
+
+## PostgreSQL Restore
+
+Minimal PostgreSQL restore is now available through a dedicated CLI command. It is intentionally scoped to the current PostgreSQL full backup format produced by this utility: `base.tar.gz` + `pg_wal.tar.gz`, plus archived WAL files reachable through `restore_command`.
+
+```bash
+python cli/dbtool.py restore --db postgres --database postgres \
+  --backup-path /path/to/full_backup_dir \
+  --data-dir /path/to/new_restore_data \
+  --archive-dir /path/to/archive_directory \
+  --restore-port 55432
+```
+
+What this command does:
+- extracts the full backup into a new PostgreSQL data directory
+- replays WAL through `restore_command` from the supplied archive directory
+- creates `recovery.signal`
+- starts PostgreSQL with `pg_ctl`
+- verifies the restored instance with `SELECT 1;`
+
+If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL archive path from `~/.backup_utility/config.json`.
 
 ## Limitations
 
 **Current Limitations:**
 - No partial/table-level backups (full database only)
 - PostgreSQL differential backup depends on a preconfigured WAL archive directory
-- No automated restore scripts
 - No end-to-end restore verification; only basic WAL validation for the PostgreSQL differential flow
 - No retention policy management
 - No background scheduling or orchestration; most operations are still sequential
@@ -305,7 +355,8 @@ Other on-disk artifacts:
 **PostgreSQL:**
 - Differential backup may require running as `postgres` user or equivalent permissions
 - Differential backup depends on filesystem access to the configured WAL archive directory
-- PITR restore interface not yet implemented
+- Restore currently targets the standard full backup layout (`base.tar.gz` + `pg_wal.tar.gz`) and does not support tablespace tar archives
+- PITR restore interface is not yet implemented
 
 **MySQL:**
 - Full backups and differential backups are implemented
@@ -319,7 +370,7 @@ This project is currently paused. Current follow-up areas if development resumes
 - Hardening the MySQL differential / incremental-from-full workflow
 - Adding PITR restore interface for PostgreSQL
 - Improving error handling and validation
-- Adding automated restore functionality
+- Hardening PostgreSQL restore verification and edge cases
 - Testing across more database versions
 - Improving documentation
 - Deciding whether to expose the experimental PostgreSQL incremental/WAL pipeline code currently living under `services/backup/incremential/` and `services/wal/`
