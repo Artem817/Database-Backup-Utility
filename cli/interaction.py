@@ -125,12 +125,20 @@ class SQLCompleter(Completer):
         'full database',
         'differential backup',
         'restore',
+        'restore database',
         'SQL',
         '-path',
         '-backup-path',
         '-data-dir',
         '-wal-path',
+        '-archive-dir',
+        '-restore-port',
+        '-verify-user',
+        '-verify-query',
+        '-pg-bin-dir',
         '-extract',
+        '-compress',
+        '-single-archive',
     ]
 
     def get_completions(self, document, complete_event):
