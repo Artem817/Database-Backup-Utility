@@ -29,13 +29,21 @@ class PostgresClient(ConnectionConfigMixin,
         self._database_engine = "postgresql"
         
         self._use_pgpass = kwargs.pop('use_pgpass', False)
+        archive_path = kwargs.pop('archive_path', None)
+        configure_wal_archive = kwargs.pop('configure_wal_archive', True)
         
         super().__init__(host, database, user, password, **kwargs)
         self._connection: Optional[connection] = None
         
-        self._archive_path: Optional[str] = None
-        self._wal_config = PostgresWalArchiveConfig()
-        self._configure_wal_archive()
+        self._archive_path: Optional[str] = (
+            str(Path(archive_path).expanduser().resolve()) if archive_path else None
+        )
+        self._wal_config = PostgresWalArchiveConfig() if configure_wal_archive else None
+        if self._archive_path:
+            self._messenger.info(f"WAL archive directory: {self._archive_path}")
+            self._logger.info(f"WAL archive path configured: {self._archive_path}")
+        elif configure_wal_archive:
+            self._configure_wal_archive()
 
     def _configure_wal_archive(self) -> None:
         """Configure WAL archive directory on initialization"""

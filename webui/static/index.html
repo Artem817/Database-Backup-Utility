@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Database Backup Utility</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">DB</div>
+          <div>
+            <h1>Backup Utility</h1>
+            <span id="health-status">local panel</span>
+          </div>
+        </div>
+
+        <nav class="nav-stack" aria-label="Main navigation">
+          <button class="nav-item active" data-view="dashboard">Dashboard</button>
+          <button class="nav-item" data-view="backup">Run Backup</button>
+          <button class="nav-item" data-view="validation">Restore Check</button>
+          <button class="nav-item" data-view="jobs">Jobs</button>
+        </nav>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <h2 id="view-title">Dashboard</h2>
+            <span id="catalog-count">0 backups</span>
+          </div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="refresh-button" title="Refresh">↻</button>
+          </div>
+        </header>
+
+        <section class="view active" id="dashboard-view">
+          <div class="metrics-row">
+            <div class="metric">
+              <span class="metric-label">Completed</span>
+              <strong id="metric-completed">0</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Failed</span>
+              <strong id="metric-failed">0</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Restore Passed</span>
+              <strong id="metric-restore">0</strong>
+            </div>
+            <div class="metric">
+              <span class="metric-label">Running Jobs</span>
+              <strong id="metric-running">0</strong>
+            </div>
+          </div>
+
+          <div class="section-header">
+            <h3>Backup Catalog</h3>
+            <span id="catalog-path"></span>
+          </div>
+          <div class="backup-list" id="backup-list"></div>
+        </section>
+
+        <section class="view" id="backup-view">
+          <form class="command-panel" id="backup-form">
+            <div class="form-grid">
+              <label>
+                Engine
+                <select name="engine" id="backup-engine">
+                  <option value="postgres">PostgreSQL</option>
+                  <option value="mysql">MySQL</option>
+                </select>
+              </label>
+              <label>
+                Host
+                <input name="host" value="localhost" autocomplete="off">
+              </label>
+              <label>
+                Port
+                <input name="port" value="5432" inputmode="numeric">
+              </label>
+              <label>
+                Database
+                <input name="database" placeholder="appdb" autocomplete="off" required>
+              </label>
+              <label>
+                User
+                <input name="user" placeholder="postgres" autocomplete="username" required>
+              </label>
+              <label>
+                Password
+                <input name="password" type="password" autocomplete="current-password">
+              </label>
+              <label class="wide">
+                Output Path
+                <input name="output_path" placeholder="/tmp/dbtool-backups" required>
+              </label>
+              <label class="postgres-only wide">
+                WAL Archive Directory
+                <input name="archive_dir" placeholder="/path/to/wal_archive">
+              </label>
+              <label class="mysql-only">
+                Login Path
+                <input name="login_path" placeholder="xtrabackup">
+              </label>
+              <label class="mysql-only">
+                Socket
+                <input name="socket" placeholder="/tmp/mysql.sock">
+              </label>
+              <label class="postgres-only">
+                PostgreSQL Bin Dir
+                <input name="pg_bin_dir" placeholder="/opt/homebrew/bin">
+              </label>
+              <label class="postgres-only">
+                Validation Port
+                <input name="restore_validation_port" value="0" inputmode="numeric">
+              </label>
+            </div>
+
+            <div class="switch-row">
+              <label class="switch">
+                <input name="single_archive" type="checkbox" checked>
+                <span>Single archive</span>
+              </label>
+              <label class="switch postgres-only">
+                <input name="validate_restore" type="checkbox" checked>
+                <span>Test restore</span>
+              </label>
+              <label class="switch postgres-only">
+                <input name="restore_validation_checksums" type="checkbox" checked>
+                <span>Checksums</span>
+              </label>
+              <label class="switch postgres-only">
+                <input name="restore_validation_keep_data" type="checkbox">
+                <span>Keep temp data</span>
+              </label>
+              <label class="switch postgres-only">
+                <input name="use_pgpass" type="checkbox">
+                <span>.pgpass</span>
+              </label>
+            </div>
+
+            <div class="command-actions">
+              <button class="primary-button" type="submit">Start Backup</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="view" id="validation-view">
+          <form class="command-panel" id="validation-form">
+            <div class="form-grid">
+              <label>
+                Host
+                <input name="host" value="localhost" autocomplete="off">
+              </label>
+              <label>
+                Port
+                <input name="port" value="5432" inputmode="numeric">
+              </label>
+              <label>
+                Database
+                <input name="database" placeholder="appdb" required>
+              </label>
+              <label>
+                User
+                <input name="user" placeholder="postgres" required>
+              </label>
+              <label>
+                Password
+                <input name="password" type="password">
+              </label>
+              <label>
+                Verify User
+                <input name="verify_user" placeholder="postgres">
+              </label>
+              <label class="wide">
+                Backup Path
+                <input name="backup_path" placeholder="/backups/full_pg_..." required>
+              </label>
+              <label class="wide">
+                WAL Archive Directory
+                <input name="archive_dir" placeholder="/path/to/wal_archive" required>
+              </label>
+              <label>
+                Validation Port
+                <input name="restore_validation_port" value="0" inputmode="numeric">
+              </label>
+              <label>
+                PostgreSQL Bin Dir
+                <input name="pg_bin_dir" placeholder="/opt/homebrew/bin">
+              </label>
+            </div>
+
+            <div class="switch-row">
+              <label class="switch">
+                <input name="restore_validation_checksums" type="checkbox" checked>
+                <span>Checksums</span>
+              </label>
+              <label class="switch">
+                <input name="restore_validation_keep_data" type="checkbox">
+                <span>Keep temp data</span>
+              </label>
+              <label class="switch">
+                <input name="use_pgpass" type="checkbox">
+                <span>.pgpass</span>
+              </label>
+            </div>
+
+            <div class="command-actions">
+              <button class="primary-button" type="submit">Run Restore Check</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="view" id="jobs-view">
+          <div class="jobs-layout">
+            <div class="job-list" id="job-list"></div>
+            <div class="log-panel">
+              <div class="section-header">
+                <h3 id="log-title">Job Log</h3>
+                <span id="log-status">idle</span>
+              </div>
+              <pre id="job-log"></pre>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <dialog id="document-dialog">
+        <div class="dialog-head">
+          <h3 id="document-title">Document</h3>
+          <button class="icon-button" id="document-close" title="Close">×</button>
+        </div>
+        <pre id="document-viewer"></pre>
+      </dialog>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

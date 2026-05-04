@@ -14,6 +14,7 @@
 - **Encrypted credential profiles (MySQL login-path, PostgreSQL .pgpass)**
 - SQLite-backed backup catalog tracking and versioned per-backup metadata/validation artifacts
 - Optional single `.tar.zst` archive creation for full backups when `zstd` is available
+- Local Web UI for dashboard, backup execution, restore validation, job logs, and metadata/validation viewing
 
 **Not Yet Implemented:**
 - Point-in-Time Recovery (PITR) restore interface
@@ -297,6 +298,30 @@ help
 # Exit
 exit
 ```
+
+## Local Web UI
+
+The project also includes a lightweight local control panel built on Python's standard HTTP server. It does not require Flask, FastAPI, or frontend build tooling.
+
+```bash
+source .venv/bin/activate
+python -m webui.server
+```
+
+Open:
+
+```text
+http://127.0.0.1:8765
+```
+
+The Web UI provides:
+- backup catalog dashboard from `backup_catalog.db`
+- PostgreSQL/MySQL full backup form
+- PostgreSQL test-restore validation form
+- background job status and live job logs
+- `metadata.json` and `validation.json` viewer
+
+For PostgreSQL backups, pass the WAL archive directory in the form. The web server does not use the CLI prompt flow for WAL archive configuration.
 
 For PostgreSQL restore, `-wal-path` should point to the WAL archive directory used by `restore_command`, not to a single WAL segment file.
 
