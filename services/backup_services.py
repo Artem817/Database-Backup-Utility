@@ -13,7 +13,36 @@ class BackupService:
         
         storage_type = getattr(parsed_args, 'storage_type', 'local')
         single_archive = getattr(parsed_args, 'single_archive', True)
-        self.dbclient.backup_full(outpath=parsed_args.path, single_archive=single_archive, storage=storage_type)
+        if getattr(self.dbclient, "database_engine", None) == "postgresql":
+            self.dbclient.backup_full(
+                outpath=parsed_args.path,
+                single_archive=single_archive,
+                storage=storage_type,
+                validate_restore=getattr(parsed_args, "validate_restore", True),
+                restore_validation_port=getattr(parsed_args, "restore_validation_port", 0),
+                restore_validation_keep_data=getattr(
+                    parsed_args,
+                    "restore_validation_keep_data",
+                    False,
+                ),
+                restore_validation_checksums=getattr(
+                    parsed_args,
+                    "restore_validation_checksums",
+                    True,
+                ),
+                pg_bin_dir=(
+                    str(parsed_args.pg_bin_dir)
+                    if getattr(parsed_args, "pg_bin_dir", None)
+                    else None
+                ),
+            )
+            return
+
+        self.dbclient.backup_full(
+            outpath=parsed_args.path,
+            single_archive=single_archive,
+            storage=storage_type,
+        )
         
         
     def differential_backup(self, parsed_args) -> None:

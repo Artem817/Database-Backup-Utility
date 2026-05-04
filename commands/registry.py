@@ -13,15 +13,17 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
 
         messenger.print_colored("1) Full database backup", MessageLevel.INFO)
         print("   Command:")
-        print("     full database -path <destination_path> [-single-archive true|false]")
+        print("     full database -path <destination_path> [-single-archive true|false] [-validate-restore true|false]")
         print("   Examples:")
         print("     full database -path /backups/postgres")
         print("     full database -path /backups/postgres -single-archive false")
+        print("     full database -path /backups/postgres -validate-restore true")
         print("   Details:")
         print("     - Creates a physical full backup for the connected database.")
         print("     - PostgreSQL uses pg_basebackup.")
         print("     - MySQL uses xtrabackup.")
         print("     - By default, also creates a single .tar.zst archive for easier storage/upload.")
+        print("     - PostgreSQL full backups run an automated temporary restore validation by default.")
         print()
 
         messenger.print_colored("2) Differential backup", MessageLevel.INFO)
@@ -84,6 +86,9 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
         print("   -archive-dir <path>          Alias for -wal-path")
         print("   -compress true|false         Compression flag used by supported backup flows")
         print("   -single-archive true|false   Create a single .tar.zst archive for full backups")
+        print("   -validate-restore true|false Run PostgreSQL full backup test-restore validation")
+        print("   -restore-validation-port <p> Port for validation restore, 0 chooses a free port")
+        print("   -restore-validation-checksums true|false Compare per-table restore checksums")
         print("   -extract                     Export SQL result to CSV instead of previewing it")
         print()
 

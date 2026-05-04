@@ -56,6 +56,7 @@ class ContractValidationReport:
     checkpoints: Dict[str, Any]
     markers: Dict[str, Any]
     recovery_status: Dict[str, Any]
+    restore_validation: Dict[str, Any] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -160,6 +161,8 @@ class BackupContractManager:
             "checkpoints_present": normalized["checkpoints"]["exists"],
             "recovery_status": DEFAULT_RECOVERY_STATUS,
         }
+        normalized.setdefault("restore_validation_required", False)
+        normalized.setdefault("restore_validation", {})
 
         return normalized
 
@@ -176,7 +179,17 @@ class BackupContractManager:
             for key, artifact in artifact_report.items()
             if artifact.get("required") and not artifact.get("exists")
         )
-        status = "passed" if not metadata_errors and not missing_required else "failed"
+        recovery_status = self._build_recovery_status(metadata_doc)
+        restore_validation_required = bool(metadata_doc.get("restore_validation_required"))
+        recovery_valid = (
+            not restore_validation_required
+            or recovery_status.get("state") == "passed"
+        )
+        status = (
+            "passed"
+            if not metadata_errors and not missing_required and recovery_valid
+            else "failed"
+        )
 
         report = ContractValidationReport(
             schema_version=VALIDATION_SCHEMA_VERSION,
@@ -201,11 +214,43 @@ class BackupContractManager:
                 "lsn": metadata_doc["lsn_markers"],
                 "binlog": metadata_doc["binlog_markers"],
             },
-            recovery_status=asdict(RecoveryStatus()),
+            recovery_status=recovery_status,
+            restore_validation=metadata_doc.get("restore_validation") or {},
             warnings=warnings,
         )
 
         return asdict(report)
+
+    @staticmethod
+    def _build_recovery_status(metadata_doc: Dict[str, Any]) -> Dict[str, Any]:
+        restore_validation = metadata_doc.get("restore_validation")
+        restore_validation_required = bool(metadata_doc.get("restore_validation_required"))
+
+        if isinstance(restore_validation, dict) and restore_validation:
+            state = restore_validation.get("state") or DEFAULT_RECOVERY_STATUS
+            details = restore_validation.get("error")
+            if not details:
+                comparison = restore_validation.get("checks", {}).get("table_comparison", {})
+                if comparison:
+                    details = (
+                        "matched_tables="
+                        f"{comparison.get('matched_tables', 0)}, "
+                        "row_count_mismatches="
+                        f"{len(comparison.get('row_count_mismatches', []))}, "
+                        "checksum_mismatches="
+                        f"{len(comparison.get('checksum_mismatches', []))}"
+                    )
+
+            return {
+                "state": state,
+                "checked_at": restore_validation.get("completed_at"),
+                "details": details,
+                "required": restore_validation_required,
+            }
+
+        recovery_status = asdict(RecoveryStatus())
+        recovery_status["required"] = restore_validation_required
+        return recovery_status
 
     def validate_metadata_document(self, metadata_doc: Dict[str, Any]) -> list[str]:
         errors: list[str] = []

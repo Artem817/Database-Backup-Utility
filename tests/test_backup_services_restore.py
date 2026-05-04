@@ -15,9 +15,45 @@ class DummyDbClient:
         self.archive_path = "/configured/archive"
         self._logger = object()
         self._messenger = object()
+        self.backup_full_calls = []
+
+    def backup_full(self, **kwargs):
+        self.backup_full_calls.append(kwargs)
 
 
 class BackupServiceRestoreTests(unittest.TestCase):
+    def test_full_backup_passes_restore_validation_flags_for_postgres(self) -> None:
+        dbclient = DummyDbClient()
+        service = BackupService(dbclient)
+        parsed_args = SimpleNamespace(
+            path="/backups",
+            storage_type="local",
+            single_archive=True,
+            validate_restore=True,
+            restore_validation_port=55440,
+            restore_validation_keep_data=True,
+            restore_validation_checksums=False,
+            pg_bin_dir="/opt/postgres/bin",
+        )
+
+        service.full_backup(parsed_args)
+
+        self.assertEqual(
+            dbclient.backup_full_calls,
+            [
+                {
+                    "outpath": "/backups",
+                    "single_archive": True,
+                    "storage": "local",
+                    "validate_restore": True,
+                    "restore_validation_port": 55440,
+                    "restore_validation_keep_data": True,
+                    "restore_validation_checksums": False,
+                    "pg_bin_dir": "/opt/postgres/bin",
+                }
+            ],
+        )
+
     def test_restore_postgres_uses_manual_wal_path(self) -> None:
         service = BackupService(DummyDbClient())
         parsed_args = SimpleNamespace(

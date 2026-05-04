@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import psycopg2
 from psycopg2.extensions import connection
-from datetime import datetime
+from datetime import datetime, timezone
 
 from mixins.backup_catalog_mixin import BackupCatalogMixin
 from mixins.conection_config_mixin import ConnectionConfigMixin
@@ -180,7 +180,17 @@ class PostgresClient(ConnectionConfigMixin,
     @_check_wal_level
     @check_basebackup
     @requires_replication_privilege
-    def backup_full(self, outpath: str, single_archive: bool = True, storage = 'local') -> bool:
+    def backup_full(
+        self,
+        outpath: str,
+        single_archive: bool = True,
+        storage='local',
+        validate_restore: bool = True,
+        restore_validation_port: int = 0,
+        restore_validation_keep_data: bool = False,
+        restore_validation_checksums: bool = True,
+        pg_bin_dir: str | None = None,
+    ) -> bool:
         """Create full database backup with zstd compression"""
         base_path = Path(outpath) if isinstance(outpath, str) else outpath
         self._messenger.info(f"Starting full backup → {base_path}")
@@ -289,6 +299,7 @@ class PostgresClient(ConnectionConfigMixin,
             metadata["backup_size_bytes"] = total_size
             metadata["wal_archived"] = True
             metadata["backup_format"] = "tar+gzip"
+            metadata["restore_validation_required"] = bool(validate_restore)
             
             if single_archive:
                 self._messenger.section_header("Creating Single Archive (zstd)")
@@ -300,9 +311,20 @@ class PostgresClient(ConnectionConfigMixin,
                     self._messenger.success(f"✓ Single archive ready: {archive_path.name}")
                 else:
                     self._messenger.warning("Single archive creation skipped/failed - backup remains as directory")
+
+            validation_passed = True
+            if validate_restore:
+                validation_passed = self._run_restore_validation(
+                    metadata=metadata,
+                    backup_dir=backup_dir,
+                    restore_validation_port=restore_validation_port,
+                    restore_validation_keep_data=restore_validation_keep_data,
+                    restore_validation_checksums=restore_validation_checksums,
+                    pg_bin_dir=pg_bin_dir,
+                )
             
-            self._logger.finish_backup(metadata, success=True)
-            return True
+            self._logger.finish_backup(metadata, success=validation_passed)
+            return validation_passed
         
         except Exception as e:
             self._messenger.error(f"Backup failed: {e}")
@@ -310,3 +332,50 @@ class PostgresClient(ConnectionConfigMixin,
             self._logger.finish_backup(metadata, success=False)
             return False
 
+    def _run_restore_validation(
+        self,
+        metadata: dict,
+        backup_dir: Path,
+        restore_validation_port: int,
+        restore_validation_keep_data: bool,
+        restore_validation_checksums: bool,
+        pg_bin_dir: str | None,
+    ) -> bool:
+        from services.validation.postgres_restore_validation import (
+            PostgresRestoreValidationService,
+        )
+
+        self._messenger.section_header("Automated Restore Validation")
+
+        if not self._archive_path:
+            error = "WAL archive directory is not configured"
+            metadata["restore_validation"] = {
+                "schema_version": "1.0",
+                "mode": "postgresql_test_restore",
+                "state": "failed",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "error": error,
+            }
+            self._messenger.error(error)
+            self._logger.error(error)
+            return False
+
+        validation_backup_path = Path(metadata.get("archive_path") or backup_dir)
+
+        validator = PostgresRestoreValidationService(
+            backup_path=validation_backup_path,
+            archive_dir=self._archive_path,
+            source_connection_params=self.connection_params,
+            restore_port=restore_validation_port,
+            verify_database=self._database,
+            verify_user=self._user or "postgres",
+            pg_bin_dir=pg_bin_dir,
+            checksum_tables=restore_validation_checksums,
+            keep_data_dir=restore_validation_keep_data,
+            logger=self._logger,
+            messenger=self._messenger,
+        )
+        report = validator.validate()
+        metadata["restore_validation"] = report
+        return report.get("state") == "passed"

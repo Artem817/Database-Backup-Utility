@@ -97,6 +97,10 @@ def parse_query_args(query: str):
     parser.add_argument("-verify-user", default=None, help="User for restore verification query")
     parser.add_argument("-verify-query", default="SELECT 1;", help="SQL query for restore verification")
     parser.add_argument("-pg-bin-dir", type=Path, default=None, help="Directory with pg_ctl and psql binaries")
+    parser.add_argument("-validate-restore", type=str_to_bool_caster, default=True, help="Run automated test-restore after PostgreSQL full backup")
+    parser.add_argument("-restore-validation-port", type=int, default=0, help="Port for automated restore validation; 0 selects a free port")
+    parser.add_argument("-restore-validation-keep-data", type=str_to_bool_caster, default=False, help="Keep temporary restore data after validation")
+    parser.add_argument("-restore-validation-checksums", type=str_to_bool_caster, default=True, help="Compare per-table restore checksums")
     parser.add_argument("-compress", type=str_to_bool_caster, default=False, help="Compression flag")
     parser.add_argument("-extract", action='store_true', help="Extract SQL result to CSV")
     parser.add_argument("-single-archive", type=str_to_bool_caster, default=True, help="Create single .tar.zst archive")
@@ -136,6 +140,10 @@ class SQLCompleter(Completer):
         '-verify-user',
         '-verify-query',
         '-pg-bin-dir',
+        '-validate-restore',
+        '-restore-validation-port',
+        '-restore-validation-keep-data',
+        '-restore-validation-checksums',
         '-extract',
         '-compress',
         '-single-archive',

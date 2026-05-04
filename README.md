@@ -6,6 +6,8 @@
 - PostgreSQL full backup using `pg_basebackup` with WAL streaming
 - PostgreSQL differential backup by collecting archived WAL files from a configured `archive_directory`
 - PostgreSQL restore pipeline from full backup + archived WAL replay (`restore_command`, `recovery.signal`, startup, `SELECT 1`)
+- PostgreSQL automated end-to-end restore validation after full backups:
+  temporary instance, restore, per-table `COUNT(*)`, checksum comparison, and `validation.json` result
 - Basic PostgreSQL WAL validation (sequence gaps, timeline consistency, file sanity checks)
 - MySQL full backup using `xtrabackup` (Percona XtraBackup)
 - MySQL differential backup command implemented via `xtrabackup --incremental` against the last full backup
@@ -16,7 +18,6 @@
 **Not Yet Implemented:**
 - Point-in-Time Recovery (PITR) restore interface
 - Cloud storage integration (CLI placeholders exist, upload implementation does not)
-- End-to-end backup verification / automated test-restore workflow
 - MySQL restore automation
 - Production-grade error handling
 - Stable user-facing PostgreSQL incremental backup workflow
@@ -25,7 +26,7 @@
 - Direct filesystem access is required for MySQL physical backups and PostgreSQL archived WAL access
 - Limited testing across different PostgreSQL/MySQL versions
 - No automated cleanup of old backups
-- WAL validation is basic only; there is no full restore verification
+- WAL validation is basic; PostgreSQL full backups now also use restore validation
 - Timezone handling inconsistencies
 
 This utility is a work in progress and **not recommended for production use** at this time.
@@ -63,6 +64,8 @@ Each completed backup is persisted through the same contract layer.
 - MySQL metadata includes binlog markers when available.
 - Artifact checksums are calculated for key backup files.
 - Required artifacts are validated per engine and backup type before the backup is marked as completed in the catalog.
+- PostgreSQL full backups run an automated test-restore by default. The restored database is compared with the source database using per-table row counts and deterministic row JSON checksums.
+- The restore validation report is embedded in `validation.json` under `restore_validation`; the compact status is mirrored in `recovery_status`.
 - If backup output directory creation succeeded but later stages fail, the backup can still produce formal `metadata.json` / `validation.json` records with failed validation state.
 
 ## Requirements
@@ -268,6 +271,12 @@ python cli/dbtool.py backup --db postgres --database mydb --storage local --conf
 # Full database backup
 full database -path /path/to/backups
 
+# PostgreSQL full backup with explicit restore validation flags
+full database -path /path/to/backups \
+  -validate-restore true \
+  -restore-validation-port 0 \
+  -restore-validation-checksums true
+
 # Differential backup
 # PostgreSQL: archived WAL copy with basic validation
 # MySQL: xtrabackup incremental from the last full backup
@@ -319,7 +328,33 @@ Other on-disk artifacts:
 - `backup_catalog.db` stores backup history across runs
 - `backup_<database>.log` stores per-database logs
 
-`metadata.json` and `validation.json` are now part of the normal backup contract, not optional diagnostics. Restore and future test-restore logic are expected to consume these files together with `backup_catalog.db`.
+`metadata.json` and `validation.json` are now part of the normal backup contract, not optional diagnostics. Restore and automated test-restore logic consume these files together with `backup_catalog.db`.
+
+## PostgreSQL Automated Restore Validation
+
+PostgreSQL full backups run an end-to-end validation pipeline by default.
+
+What the validation does:
+- captures source table signatures for the selected database
+- creates a temporary PostgreSQL data directory
+- restores the backup into a temporary PostgreSQL instance on a separate port
+- runs SQL verification against the restored instance
+- compares source and restored table lists, `COUNT(*)`, and table checksums
+- stops and removes the temporary restore instance unless `-restore-validation-keep-data true` is passed
+- stores the full result in the backup's `validation.json`
+
+Useful flags:
+
+```bash
+full database -path /backups/postgres -validate-restore true
+full database -path /backups/postgres -restore-validation-port 55440
+full database -path /backups/postgres -restore-validation-checksums false
+full database -path /backups/postgres -restore-validation-keep-data true
+```
+
+If restore validation is enabled and fails, the backup contract is marked as failed even if `pg_basebackup` created files successfully. This is intentional: a backup that cannot be restored is not treated as a valid backup.
+
+For high-write databases, run validation during a quiet/maintenance window or expect legitimate source-vs-restored mismatches from writes committed after the backup recovery point.
 
 ## PostgreSQL Restore
 
@@ -347,7 +382,6 @@ If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL
 **Current Limitations:**
 - No partial/table-level backups (full database only)
 - PostgreSQL differential backup depends on a preconfigured WAL archive directory
-- No end-to-end restore verification; only basic WAL validation for the PostgreSQL differential flow
 - No retention policy management
 - No background scheduling or orchestration; most operations are still sequential
 - Limited error recovery
@@ -370,7 +404,7 @@ This project is currently paused. Current follow-up areas if development resumes
 - Hardening the MySQL differential / incremental-from-full workflow
 - Adding PITR restore interface for PostgreSQL
 - Improving error handling and validation
-- Hardening PostgreSQL restore verification and edge cases
+- Hardening PostgreSQL restore validation for very large/high-write databases
 - Testing across more database versions
 - Improving documentation
 - Deciding whether to expose the experimental PostgreSQL incremental/WAL pipeline code currently living under `services/backup/incremential/` and `services/wal/`

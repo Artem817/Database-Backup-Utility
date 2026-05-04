@@ -73,6 +73,47 @@ class PostgresRestoreService:
         finally:
             self._cleanup_extract_root()
 
+    def stop(self) -> bool:
+        try:
+            if not self._data_dir.exists():
+                return True
+
+            postmaster_pid = self._data_dir / "postmaster.pid"
+            if not postmaster_pid.exists():
+                self._message_info("Restored PostgreSQL instance is not running")
+                return True
+
+            command = [
+                self._binary_path("pg_ctl"),
+                "-D",
+                str(self._data_dir),
+                "-w",
+                "stop",
+                "-m",
+                "fast",
+            ]
+
+            self._message_info("Stopping restored PostgreSQL instance")
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                self._message_warning(
+                    "pg_ctl stop failed. "
+                    f"stdout: {result.stdout.strip()} stderr: {result.stderr.strip()}"
+                )
+                return False
+
+            self._message_success("Restored PostgreSQL instance stopped")
+            return True
+        except Exception as error:
+            self._message_warning(f"Failed to stop restored PostgreSQL instance: {error}")
+            return False
+
     def _validate_inputs(self) -> None:
         if not self._backup_path.exists():
             raise FileNotFoundError(f"Backup path not found: {self._backup_path}")
@@ -360,6 +401,12 @@ class PostgresRestoreService:
             self._messenger.success(message)
         if self._logger is not None:
             self._logger.info(message)
+
+    def _message_warning(self, message: str) -> None:
+        if self._messenger is not None:
+            self._messenger.warning(message)
+        if self._logger is not None:
+            self._logger.warning(message)
 
     def _message_error(self, message: str) -> None:
         if self._messenger is not None:

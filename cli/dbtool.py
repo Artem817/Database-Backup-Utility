@@ -101,6 +101,30 @@ parser.add_argument(
     "--pg-bin-dir",
     help="Directory containing pg_ctl and psql when PostgreSQL binaries are not in PATH"
 )
+parser.add_argument(
+    "--validate-restore",
+    type=lambda x: x.lower() in ['true', 't', 'yes', 'y', '1'],
+    default=True,
+    help="Run automated PostgreSQL test-restore after full backup (default: True)"
+)
+parser.add_argument(
+    "--restore-validation-port",
+    type=int,
+    default=0,
+    help="Port for automated restore validation; 0 selects a free port (default: 0)"
+)
+parser.add_argument(
+    "--restore-validation-keep-data",
+    type=lambda x: x.lower() in ['true', 't', 'yes', 'y', '1'],
+    default=False,
+    help="Keep temporary restore data directory after validation (default: False)"
+)
+parser.add_argument(
+    "--restore-validation-checksums",
+    type=lambda x: x.lower() in ['true', 't', 'yes', 'y', '1'],
+    default=True,
+    help="Compare per-table checksums during restore validation (default: True)"
+)
 
 parser.add_argument(
     "--single-archive",

@@ -109,6 +109,102 @@ class BackupContractManagerTests(unittest.TestCase):
             self.assertEqual(validation_doc["status"], "failed")
             self.assertIn("wal_tar_path", validation_doc["artifact_validation"]["missing_required"])
 
+    def test_restore_validation_result_is_written_to_validation_document(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / "validated_pg"
+            backup_dir.mkdir()
+            (backup_dir / "base.tar.gz").write_bytes(b"base-data")
+            (backup_dir / "pg_wal.tar.gz").write_bytes(b"wal-data")
+
+            metadata = {
+                "id": "full_pg_003",
+                "type": "full",
+                "database_type": "postgresql",
+                "database_name": "appdb",
+                "timestamp_start": self.timestamp,
+                "timestamp_end": self.timestamp,
+                "duration_seconds": 1.0,
+                "status": "completed",
+                "backup_location": str(backup_dir),
+                "statistics": {
+                    "total_tables": 0,
+                    "total_rows_processed": 0,
+                    "total_size_bytes": 0,
+                },
+                "restore_validation_required": True,
+                "restore_validation": {
+                    "schema_version": "1.0",
+                    "mode": "postgresql_test_restore",
+                    "state": "passed",
+                    "completed_at": self.timestamp,
+                    "checks": {
+                        "table_comparison": {
+                            "matches": True,
+                            "matched_tables": 2,
+                            "row_count_mismatches": [],
+                            "checksum_mismatches": [],
+                        }
+                    },
+                },
+            }
+
+            result = self.manager.persist_backup_documents(
+                metadata=metadata,
+                output_dir=backup_dir,
+                backup_succeeded=True,
+            )
+            validation_doc = json.loads((backup_dir / "validation.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(validation_doc["status"], "passed")
+            self.assertEqual(validation_doc["recovery_status"]["state"], "passed")
+            self.assertTrue(validation_doc["recovery_status"]["required"])
+            self.assertEqual(validation_doc["restore_validation"]["state"], "passed")
+
+    def test_required_restore_validation_failure_fails_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / "restore_failed_pg"
+            backup_dir.mkdir()
+            (backup_dir / "base.tar.gz").write_bytes(b"base-data")
+            (backup_dir / "pg_wal.tar.gz").write_bytes(b"wal-data")
+
+            metadata = {
+                "id": "full_pg_004",
+                "type": "full",
+                "database_type": "postgresql",
+                "database_name": "appdb",
+                "timestamp_start": self.timestamp,
+                "timestamp_end": self.timestamp,
+                "duration_seconds": 1.0,
+                "status": "completed",
+                "backup_location": str(backup_dir),
+                "statistics": {
+                    "total_tables": 0,
+                    "total_rows_processed": 0,
+                    "total_size_bytes": 0,
+                },
+                "restore_validation_required": True,
+                "restore_validation": {
+                    "schema_version": "1.0",
+                    "mode": "postgresql_test_restore",
+                    "state": "failed",
+                    "completed_at": self.timestamp,
+                    "error": "row count mismatch",
+                },
+            }
+
+            result = self.manager.persist_backup_documents(
+                metadata=metadata,
+                output_dir=backup_dir,
+                backup_succeeded=True,
+            )
+            validation_doc = json.loads((backup_dir / "validation.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(validation_doc["status"], "failed")
+            self.assertEqual(validation_doc["recovery_status"]["state"], "failed")
+            self.assertEqual(validation_doc["recovery_status"]["details"], "row count mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()
