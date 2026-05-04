@@ -14,6 +14,8 @@ Database clients
 
 Backup coordination
 -------------------
+- ``BackupCatalog`` (``services/backup/catalog.py``) – persists backup history in SQLite and resolves backup chains by ``parent_backup_id`` / ``base_backup_id``.
+- ``BackupContractManager`` (``services/backup/contracts.py``) – normalizes versioned ``metadata.json`` / ``validation.json`` documents, computes artifact checksums, and records validation state.
 - ``DifferentialBackupService`` (``services/backup/core.py``) – strategy coordinator that is closed for modification but open for extension through concrete strategies.
 - ``DifferentialBackupStrategyBase`` (``services/backup/differential/strategy_base.py``) – shared helpers for writing metadata and finalizing logger transactions.
 - ``PostgresDifferentialBackupStrategy`` (``services/backup/differential/strategy/postgres_strategy.py``) – collects WAL files from the archive directory, validates chain continuity, and writes a differential backup directory with metadata.
