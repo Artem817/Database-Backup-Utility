@@ -66,6 +66,7 @@ class BackupServiceRestoreTests(unittest.TestCase):
             verify_user=None,
             verify_query="SELECT 1;",
             pg_bin_dir=None,
+            target_time=None,
         )
 
         with patch("services.backup_services.PostgresRestoreService") as restore_cls:
@@ -82,9 +83,56 @@ class BackupServiceRestoreTests(unittest.TestCase):
                 verify_user="artempavlenko",
                 verify_query="SELECT 1;",
                 pg_bin_dir=None,
+                target_time=None,
                 logger=service.dbclient._logger,
                 messenger=service.dbclient._messenger,
             )
+
+    def test_restore_postgres_selects_catalog_base_for_target_time(self) -> None:
+        service = BackupService(DummyDbClient())
+        parsed_args = SimpleNamespace(
+            backup_path=None,
+            path=None,
+            data_dir="/tmp/restore-data",
+            wal_path="/manual/wal-archive",
+            archive_dir=None,
+            restore_port=55432,
+            verify_user=None,
+            verify_query="SELECT 1;",
+            pg_bin_dir=None,
+            target_time="2026-05-04 12:30:00",
+            catalog_path="/tmp/catalog.db",
+        )
+
+        with patch("services.backup_services.PostgresPitrPlanner") as planner_cls:
+            with patch("services.backup_services.PostgresRestoreService") as restore_cls:
+                planner_cls.return_value.build_plan.return_value = SimpleNamespace(
+                    backup_path="/backups/full_pg",
+                    recovery_target_time="2026-05-04 12:30:00+00:00",
+                )
+                restore_cls.return_value.restore.return_value = True
+
+                service.restore_postgres(parsed_args)
+
+                planner_cls.assert_called_once_with(
+                    database_name="BackUpTestDB",
+                    target_time="2026-05-04 12:30:00",
+                    catalog_path="/tmp/catalog.db",
+                    messenger=service.dbclient._messenger,
+                )
+                restore_cls.assert_called_once_with(
+                    backup_path="/backups/full_pg",
+                    data_dir="/tmp/restore-data",
+                    archive_dir="/manual/wal-archive",
+                    restore_port=55432,
+                    verify_database="BackUpTestDB",
+                    verify_user="artempavlenko",
+                    verify_query="SELECT 1;",
+                    pg_bin_dir=None,
+                    target_time="2026-05-04 12:30:00+00:00",
+                    logger=service.dbclient._logger,
+                    messenger=service.dbclient._messenger,
+                )
 
     def test_restore_postgres_rejects_non_postgres_client(self) -> None:
         service = BackupService(DummyDbClient(database_engine="mysql"))
@@ -98,6 +146,7 @@ class BackupServiceRestoreTests(unittest.TestCase):
             verify_user=None,
             verify_query="SELECT 1;",
             pg_bin_dir=None,
+            target_time=None,
         )
 
         with self.assertRaisesRegex(ValueError, "only for PostgreSQL"):

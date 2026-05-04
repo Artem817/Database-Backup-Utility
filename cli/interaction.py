@@ -93,6 +93,8 @@ def parse_query_args(query: str):
     parser.add_argument("-data-dir", type=Path, default=None, help="New PostgreSQL data directory")
     parser.add_argument("-wal-path", type=Path, default=None, help="Path to PostgreSQL WAL archive directory")
     parser.add_argument("-archive-dir", type=Path, default=None, help="Alias for -wal-path")
+    parser.add_argument("-target-time", default=None, help="PostgreSQL PITR target time; values without timezone are UTC")
+    parser.add_argument("-catalog-path", default="backup_catalog.db", help="Backup catalog path for PITR base backup selection")
     parser.add_argument("-restore-port", type=int, default=55432, help="Port for restored PostgreSQL")
     parser.add_argument("-verify-user", default=None, help="User for restore verification query")
     parser.add_argument("-verify-query", default="SELECT 1;", help="SQL query for restore verification")
@@ -136,6 +138,8 @@ class SQLCompleter(Completer):
         '-data-dir',
         '-wal-path',
         '-archive-dir',
+        '-target-time',
+        '-catalog-path',
         '-restore-port',
         '-verify-user',
         '-verify-query',

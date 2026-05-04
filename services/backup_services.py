@@ -1,6 +1,12 @@
 from custom_logging import BackupCatalog
 from services.backup.metadata import BackupMetadataReader
 from services.restore.postgres_restore import PostgresRestoreService
+from services.restore.pitr import (
+    PITR_TIMEZONE_POLICY,
+    PostgresPitrPlanner,
+    format_recovery_target_time,
+    parse_recovery_target_time,
+)
 
 class BackupService:
     def __init__(self, dbclient) -> None:
@@ -61,11 +67,14 @@ class BackupService:
         if getattr(self.dbclient, "database_engine", None) != "postgresql":
             raise ValueError("Restore command is currently implemented only for PostgreSQL")
 
+        target_time = getattr(parsed_args, "target_time", None)
         backup_path = parsed_args.backup_path or parsed_args.path
-        if not backup_path:
+        if not backup_path and not target_time:
             raise ValueError(
-                "Backup path is required. Use: restore -path <full_backup_dir_or_archive> "
-                "-data-dir <new_data_dir> [-wal-path <wal_archive_dir>]"
+                "Backup path is required unless PITR target time is provided. Use: "
+                "restore -path <full_backup_dir_or_archive> -data-dir <new_data_dir> "
+                "[-wal-path <wal_archive_dir>] or restore -target-time "
+                "\"2026-05-04 12:30:00\" -data-dir <new_data_dir>"
             )
 
         if not parsed_args.data_dir:
@@ -85,6 +94,25 @@ class BackupService:
                 "or configure archive_directory for PostgreSQL first."
             )
 
+        recovery_target_time = None
+        if target_time:
+            if backup_path:
+                recovery_target_time = format_recovery_target_time(
+                    parse_recovery_target_time(str(target_time))
+                )
+                self.dbclient._messenger.info(f"Using explicit backup path for PITR: {backup_path}")
+                self.dbclient._messenger.info(PITR_TIMEZONE_POLICY)
+                self.dbclient._messenger.info(f"Recovery target time: {recovery_target_time}")
+            else:
+                pitr_plan = PostgresPitrPlanner(
+                    database_name=self.dbclient.database_name,
+                    target_time=str(target_time),
+                    catalog_path=str(getattr(parsed_args, "catalog_path", "backup_catalog.db")),
+                    messenger=self.dbclient._messenger,
+                ).build_plan()
+                backup_path = pitr_plan.backup_path
+                recovery_target_time = pitr_plan.recovery_target_time
+
         restore_service = PostgresRestoreService(
             backup_path=str(backup_path),
             data_dir=str(parsed_args.data_dir),
@@ -94,6 +122,7 @@ class BackupService:
             verify_user=parsed_args.verify_user or self.dbclient.connection_params.get("user") or "postgres",
             verify_query=parsed_args.verify_query,
             pg_bin_dir=str(parsed_args.pg_bin_dir) if parsed_args.pg_bin_dir else None,
+            target_time=recovery_target_time,
             logger=self.dbclient._logger,
             messenger=self.dbclient._messenger,
         )

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from services.backup.archive_utils import extract_archive
+from services.restore.pitr import format_recovery_target_time, parse_recovery_target_time
 
 
 class PostgresRestoreService:
@@ -26,6 +27,7 @@ class PostgresRestoreService:
         verify_user: str = "postgres",
         verify_query: str = "SELECT 1;",
         pg_bin_dir: str | None = None,
+        target_time: str | None = None,
         logger=None,
         messenger=None,
     ) -> None:
@@ -37,6 +39,11 @@ class PostgresRestoreService:
         self._verify_user = verify_user
         self._verify_query = verify_query
         self._pg_bin_dir = Path(pg_bin_dir).expanduser().resolve() if pg_bin_dir else None
+        self._target_time = (
+            format_recovery_target_time(parse_recovery_target_time(target_time))
+            if target_time
+            else None
+        )
         self._logger = logger
         self._messenger = messenger
         self._extract_root: Path | None = None
@@ -63,6 +70,8 @@ class PostgresRestoreService:
             self._message_success("PostgreSQL restore pipeline completed successfully")
             self._message_info(f"Restored data directory: {self._data_dir}")
             self._message_info(f"Restore port: {self._restore_port}")
+            if self._target_time:
+                self._message_info(f"PITR recovery target time: {self._target_time}")
             self._message_info(
                 f"Stop command: {self._binary_path('pg_ctl')} -D {self._data_dir} stop"
             )
@@ -240,16 +249,28 @@ class PostgresRestoreService:
         ).rstrip()
 
         restore_command = self._build_restore_command()
-        block = "\n".join(
+        config_lines = [
+            self.CONFIG_BLOCK_START,
+            f"restore_command = '{restore_command}'",
+            "archive_mode = off",
+        ]
+        if self._target_time:
+            target_time = self._escape_pg_conf_value(self._target_time)
+            config_lines.extend(
+                [
+                    f"recovery_target_time = '{target_time}'",
+                    "recovery_target_action = 'promote'",
+                    "recovery_target_timeline = 'latest'",
+                ]
+            )
+        config_lines.extend(
             [
-                self.CONFIG_BLOCK_START,
-                f"restore_command = '{restore_command}'",
-                "archive_mode = off",
                 f"port = {self._restore_port}",
                 "listen_addresses = '127.0.0.1'",
                 self.CONFIG_BLOCK_END,
             ]
         )
+        block = "\n".join(config_lines)
 
         new_content = block if not existing else f"{existing}\n\n{block}"
         auto_conf.write_text(f"{new_content}\n", encoding="utf-8")
@@ -258,7 +279,11 @@ class PostgresRestoreService:
     def _build_restore_command(self) -> str:
         archive_file = self._archive_dir / "%f"
         command = f'cp "{archive_file}" "%p"'
-        return command.replace("'", "''")
+        return self._escape_pg_conf_value(command)
+
+    @staticmethod
+    def _escape_pg_conf_value(value: str) -> str:
+        return value.replace("'", "''")
 
     def _prepend_local_hba_rules(self) -> None:
         pg_hba_path = self._data_dir / "pg_hba.conf"

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, Optional
 
 
 CATALOG_SCHEMA_VERSION = "1.0"
@@ -28,10 +30,18 @@ class BackupCatalog:
         self._initialize_schema()
         self._import_legacy_json_if_needed()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.catalog_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _initialize_schema(self) -> None:
         with self._connect() as connection:
@@ -292,6 +302,45 @@ class BackupCatalog:
         )
         return backups[0] if backups else None
 
+    def find_pitr_base_backup(
+        self,
+        database_name: str,
+        target_time: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        if not database_name:
+            raise ValueError("Database name is required for PITR base backup lookup.")
+        if not isinstance(target_time, datetime):
+            raise ValueError("target_time must be a datetime.")
+
+        target_utc = self._normalize_catalog_datetime(target_time)
+        backups = self.list_backups(
+            database_name=database_name,
+            status="completed",
+            backup_type="full",
+        )
+
+        eligible: list[tuple[datetime, Dict[str, Any]]] = []
+        for backup in backups:
+            engine = backup.get("engine") or backup.get("database_type")
+            if engine != "postgresql":
+                continue
+
+            backup_time = self._parse_catalog_datetime(
+                backup.get("timestamp_end") or backup.get("timestamp_start")
+            )
+            if backup_time is None:
+                continue
+
+            backup_utc = self._normalize_catalog_datetime(backup_time)
+            if backup_utc <= target_utc:
+                eligible.append((backup_utc, backup))
+
+        if not eligible:
+            return None
+
+        eligible.sort(key=lambda item: item[0], reverse=True)
+        return eligible[0][1]
+
     def get_last_full_backup(self, database_name: str | None = None) -> Optional[Dict[str, Any]]:
         return self.get_last_backup_by_type("full", database_name=database_name)
 
@@ -320,3 +369,23 @@ class BackupCatalog:
             current = parent
 
         return chain
+
+    @staticmethod
+    def _parse_catalog_datetime(value: Any) -> Optional[datetime]:
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
+
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalize_catalog_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

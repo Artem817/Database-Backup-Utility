@@ -15,6 +15,12 @@ from cli.validateconfig import validate_config
 from console_utils import get_messenger, configure_messenger
 from custom_logging import BackupLogger
 from services.restore.postgres_restore import PostgresRestoreService
+from services.restore.pitr import (
+    PITR_TIMEZONE_POLICY,
+    PostgresPitrPlanner,
+    format_recovery_target_time,
+    parse_recovery_target_time,
+)
 
 EXIT_FAILURE = 1
 
@@ -40,6 +46,11 @@ Examples:
   python cli/dbtool.py restore --db postgres --database postgres \\
     --backup-path /backups/full_pg_20260427_120000_abcd \\
     --data-dir /tmp/postgres-restore --archive-dir /tmp/pg_archive
+
+  # PostgreSQL PITR restore; base backup is selected from backup_catalog.db
+  python cli/dbtool.py restore --db postgres --database postgres \\
+    --target-time "2026-05-04 12:30:00" \\
+    --data-dir /tmp/postgres-pitr --archive-dir /tmp/pg_archive
     """
 )
 
@@ -81,6 +92,18 @@ parser.add_argument("--password", help="Database password")
 parser.add_argument("--backup-path", help="PostgreSQL full backup directory or .tar.zst archive to restore")
 parser.add_argument("--data-dir", help="New PostgreSQL data directory for restore")
 parser.add_argument("--archive-dir", help="Path to archived WAL files for PostgreSQL restore")
+parser.add_argument(
+    "--target-time",
+    help=(
+        "PostgreSQL PITR target time. Values without timezone are UTC. If "
+        "--backup-path is omitted, the base backup is selected from backup_catalog.db."
+    ),
+)
+parser.add_argument(
+    "--catalog-path",
+    default="backup_catalog.db",
+    help="Backup catalog path used for PITR base backup selection (default: backup_catalog.db)"
+)
 parser.add_argument(
     "--restore-port",
     type=int,
@@ -142,8 +165,8 @@ try:
     if args.command == "restore":
         if args.db != "postgres":
             parser.error("Restore is currently implemented only for --db postgres")
-        if not args.backup_path:
-            parser.error("--backup-path is required for restore")
+        if not args.backup_path and not args.target_time:
+            parser.error("--backup-path is required for restore unless --target-time is used for PITR")
         if not args.data_dir:
             parser.error("--data-dir is required for restore")
 
@@ -165,8 +188,28 @@ try:
                 "--archive-dir is required for restore when no saved PostgreSQL WAL archive directory exists"
             )
 
+        backup_path = args.backup_path
+        recovery_target_time = None
+        if args.target_time:
+            if backup_path:
+                recovery_target_time = format_recovery_target_time(
+                    parse_recovery_target_time(args.target_time)
+                )
+                messenger.info(f"Using explicit backup path for PITR: {backup_path}")
+                messenger.info(PITR_TIMEZONE_POLICY)
+                messenger.info(f"Recovery target time: {recovery_target_time}")
+            else:
+                pitr_plan = PostgresPitrPlanner(
+                    database_name=args.database,
+                    target_time=args.target_time,
+                    catalog_path=args.catalog_path,
+                    messenger=messenger,
+                ).build_plan()
+                backup_path = str(pitr_plan.backup_path)
+                recovery_target_time = pitr_plan.recovery_target_time
+
         restore_service = PostgresRestoreService(
-            backup_path=args.backup_path,
+            backup_path=backup_path,
             data_dir=args.data_dir,
             archive_dir=archive_dir,
             restore_port=args.restore_port,
@@ -174,6 +217,7 @@ try:
             verify_user=args.verify_user,
             verify_query=args.verify_query,
             pg_bin_dir=args.pg_bin_dir,
+            target_time=recovery_target_time,
             logger=restore_logger,
             messenger=messenger,
         )

@@ -33,7 +33,13 @@ class DummyMessenger:
 
 
 class PostgresRestoreServiceTests(unittest.TestCase):
-    def _build_service(self, backup_dir: Path, data_dir: Path, archive_dir: Path) -> PostgresRestoreService:
+    def _build_service(
+        self,
+        backup_dir: Path,
+        data_dir: Path,
+        archive_dir: Path,
+        target_time: str | None = None,
+    ) -> PostgresRestoreService:
         return PostgresRestoreService(
             backup_path=str(backup_dir),
             data_dir=str(data_dir),
@@ -42,6 +48,7 @@ class PostgresRestoreServiceTests(unittest.TestCase):
             verify_database="postgres",
             verify_user="postgres",
             verify_query="SELECT 1;",
+            target_time=target_time,
             logger=DummyLogger(),
             messenger=DummyMessenger(),
         )
@@ -70,6 +77,31 @@ class PostgresRestoreServiceTests(unittest.TestCase):
             self.assertIn("port = 55432", auto_conf)
             self.assertIn("listen_addresses = '127.0.0.1'", auto_conf)
             self.assertTrue((data_dir / "recovery.signal").exists())
+
+    def test_write_restore_configuration_adds_pitr_target_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / "backup"
+            data_dir = root / "data"
+            archive_dir = root / "archive"
+            backup_dir.mkdir()
+            data_dir.mkdir()
+            archive_dir.mkdir()
+
+            service = self._build_service(
+                backup_dir,
+                data_dir,
+                archive_dir,
+                target_time="2026-05-04 12:30:00+03:00",
+            )
+            service._write_restore_configuration()
+
+            auto_conf = (data_dir / "postgresql.auto.conf").read_text(encoding="utf-8")
+
+            self.assertIn("recovery_target_time = '2026-05-04 09:30:00+00:00'", auto_conf)
+            self.assertIn("recovery_target_action = 'promote'", auto_conf)
+            self.assertIn("recovery_target_timeline = 'latest'", auto_conf)
+            self.assertIn("restore_command = 'cp \"", auto_conf)
 
     def test_prepend_local_hba_rules_adds_managed_block_first(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

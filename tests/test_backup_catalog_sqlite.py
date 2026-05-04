@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from services.backup.catalog import BackupCatalog
@@ -85,6 +86,56 @@ class BackupCatalogSQLiteTests(unittest.TestCase):
 
             self.assertEqual(chain_ids, ["full_pg_app_001", "differential_pg_app_002"])
             self.assertEqual(catalog.get_last_successful_backup(database_name="appdb")["id"], "differential_pg_app_002")
+
+    def test_finds_latest_pitr_base_backup_before_target_time(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "catalog.db"
+            catalog = BackupCatalog(path=str(db_path))
+
+            backups = [
+                {
+                    "id": "full_pg_app_old",
+                    "type": "full",
+                    "backup_type": "full",
+                    "database_name": "appdb",
+                    "database_type": "postgresql",
+                    "engine": "postgresql",
+                    "status": "completed",
+                    "timestamp_start": "2026-05-04T09:55:00+00:00",
+                    "timestamp_end": "2026-05-04T10:00:00+00:00",
+                },
+                {
+                    "id": "full_pg_app_selected",
+                    "type": "full",
+                    "backup_type": "full",
+                    "database_name": "appdb",
+                    "database_type": "postgresql",
+                    "engine": "postgresql",
+                    "status": "completed",
+                    "timestamp_start": "2026-05-04T11:55:00+00:00",
+                    "timestamp_end": "2026-05-04T12:00:00+00:00",
+                },
+                {
+                    "id": "full_pg_app_future",
+                    "type": "full",
+                    "backup_type": "full",
+                    "database_name": "appdb",
+                    "database_type": "postgresql",
+                    "engine": "postgresql",
+                    "status": "completed",
+                    "timestamp_start": "2026-05-04T12:45:00+00:00",
+                    "timestamp_end": "2026-05-04T12:50:00+00:00",
+                },
+            ]
+            for backup in backups:
+                catalog.add_backup(backup)
+
+            selected = catalog.find_pitr_base_backup(
+                database_name="appdb",
+                target_time=datetime(2026, 5, 4, 12, 30, tzinfo=timezone.utc),
+            )
+
+            self.assertEqual(selected["id"], "full_pg_app_selected")
 
 
 if __name__ == "__main__":

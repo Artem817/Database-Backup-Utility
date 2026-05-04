@@ -6,6 +6,7 @@
 - PostgreSQL full backup using `pg_basebackup` with WAL streaming
 - PostgreSQL differential backup by collecting archived WAL files from a configured `archive_directory`
 - PostgreSQL restore pipeline from full backup + archived WAL replay (`restore_command`, `recovery.signal`, startup, `SELECT 1`)
+- PostgreSQL PITR restore with `--target-time`, catalog-based base backup selection, and `recovery_target_time`
 - PostgreSQL automated end-to-end restore validation after full backups:
   temporary instance, restore, per-table `COUNT(*)`, checksum comparison, and `validation.json` result
 - Basic PostgreSQL WAL validation (sequence gaps, timeline consistency, file sanity checks)
@@ -17,7 +18,6 @@
 - Local Web UI for dashboard, backup execution, restore validation, job logs, and metadata/validation viewing
 
 **Not Yet Implemented:**
-- Point-in-Time Recovery (PITR) restore interface
 - Cloud storage integration (CLI placeholders exist, upload implementation does not)
 - MySQL restore automation
 - Production-grade error handling
@@ -28,7 +28,7 @@
 - Limited testing across different PostgreSQL/MySQL versions
 - No automated cleanup of old backups
 - WAL validation is basic; PostgreSQL full backups now also use restore validation
-- Timezone handling inconsistencies
+- Naive PITR target times are interpreted as UTC; timestamps with offsets are normalized to UTC
 
 This utility is a work in progress and **not recommended for production use** at this time.
 
@@ -286,6 +286,9 @@ differential backup
 # PostgreSQL restore from interactive console
 restore -path /path/to/full_backup_dir -data-dir /path/to/new_restore_data -wal-path /path/to/archive_directory
 
+# PostgreSQL PITR restore from interactive console
+restore -target-time "2026-05-04 12:30:00" -data-dir /path/to/new_restore_data -wal-path /path/to/archive_directory
+
 # Execute SQL query
 SQL SELECT * FROM users WHERE id < 100
 
@@ -393,9 +396,19 @@ python cli/dbtool.py restore --db postgres --database postgres \
   --restore-port 55432
 ```
 
+For PITR, pass `--target-time`. Timestamps without timezone are treated as UTC. Timestamps with an offset are normalized to UTC before backup selection and before writing `recovery_target_time`. If `--backup-path` is omitted, the utility selects the newest completed PostgreSQL full backup for the database whose backup completion time is at or before the target time:
+
+```bash
+python cli/dbtool.py restore --db postgres --database postgres \
+  --target-time "2026-05-04 12:30:00" \
+  --data-dir /path/to/new_restore_data \
+  --archive-dir /path/to/archive_directory
+```
+
 What this command does:
 - extracts the full backup into a new PostgreSQL data directory
 - replays WAL through `restore_command` from the supplied archive directory
+- when `--target-time` is set, writes UTC-normalized `recovery_target_time`, `recovery_target_action = 'promote'`, and `recovery_target_timeline = 'latest'`
 - creates `recovery.signal`
 - starts PostgreSQL with `pg_ctl`
 - verifies the restored instance with `SELECT 1;`
@@ -415,7 +428,7 @@ If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL
 - Differential backup may require running as `postgres` user or equivalent permissions
 - Differential backup depends on filesystem access to the configured WAL archive directory
 - Restore currently targets the standard full backup layout (`base.tar.gz` + `pg_wal.tar.gz`) and does not support tablespace tar archives
-- PITR restore interface is not yet implemented
+- PITR depends on a complete WAL archive reachable through `restore_command` and currently uses PostgreSQL 12+ `recovery.signal` style recovery
 
 **MySQL:**
 - Full backups and differential backups are implemented
@@ -427,7 +440,7 @@ If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL
 This project is currently paused. Current follow-up areas if development resumes:
 
 - Hardening the MySQL differential / incremental-from-full workflow
-- Adding PITR restore interface for PostgreSQL
+- Hardening PITR restore validation and WAL coverage diagnostics
 - Improving error handling and validation
 - Hardening PostgreSQL restore validation for very large/high-write databases
 - Testing across more database versions
@@ -478,7 +491,7 @@ This project is experimental. Contributions are welcome, particularly:
 
 - Testing on different PostgreSQL/MySQL versions
 - Hardening MySQL differential / incremental-from-full backups
-- Implementing PITR restore interface
+- Testing PITR restore on different PostgreSQL versions and timezone settings
 - Automated restore functionality
 - Backup verification tools
 - Error handling improvements
