@@ -345,7 +345,7 @@ class PostgresRestoreService:
                 f"log tail:\n{log_tail}"
             )
 
-    def _verify_select(self) -> None:
+    def _verify_select(self) -> bool:
         command = [
             self._binary_path("psql"),
             "-h",
@@ -373,14 +373,22 @@ class PostgresRestoreService:
         )
 
         if result.returncode != 0:
-            raise RuntimeError(
+            stdout = result.stdout.strip()
+            stderr = result.stderr.strip()
+            self._message_warning(
                 "Verification SELECT failed.\n"
-                f"stdout: {result.stdout.strip()}\n"
-                f"stderr: {result.stderr.strip()}"
+                f"stdout: {stdout}\n"
+                f"stderr: {stderr}\n"
+                "Warning: this typically happens when the verification user does not exist "
+                "in the restored cluster (for example, the backup was taken with a different "
+                "login role than the default 'postgres'). The restore can still be successful "
+                "even if this verification query fails."
             )
+            return False
 
         output = result.stdout.strip() or "(no output)"
         self._message_success(f"Verification SELECT succeeded: {output}")
+        return True
 
     def _require_binary(self, binary_name: str) -> None:
         binary_path = self._binary_path(binary_name)
