@@ -1,0 +1,53 @@
+python3 cli/dbtool.py backup --db postgres --database BackUp --storage local --config profile
+
+
+python cli/dbtool.py restore --db postgres --database BackUp \
+  --backup-path /Users/artempavlenko/Documents/backups/full_BackUp_20260507_104704_88b3 \
+  --data-dir /tmp/restore_BackUp \
+  --archive-dir /Users/artempavlenko/postgresql_wal_archive \
+  --restore-port 55433
+
+pg_ctl -D /private/tmp/restore_BackUp stop
+
+INSERT INTO diff_table_test
+(id, goal_type, target_value, current_value, start_date, end_date, is_active, user_id, created_at, updated_at)
+VALUES
+('c7d8e9f0-9a0b-1c2d-5e3f-1a7b8c9d0e1f', 'cycling', 200, 85, '2025-10-28', '2025-12-28', TRUE, '8b9c0d1e-2f3a-4b1c-6d7e-8f9a0b1c2d3e', NOW(), NOW()),
+('d8e9f0a1-0b1c-2d3e-4f4a-7b8c9d0e1f2a', 'coding_hours', 500, 120, '2025-10-15', '2026-04-15', TRUE, '9c0d1e2f-3a2b-5c6d-7e8f-9a0b1c2d3e4f', NOW(), NOW()),
+('e9f0a1b2-1c2d-3e4f-3a5b-8c9d0e1f2a3b', 'youtube_subscribers', 10000, 2500, '2025-09-01', '2026-09-01', TRUE, '0d3e2f3a-4b5c-6d7e-8f9a-0b1c2d3e4f5a', NOW(), NOW()),
+('f0a1b2c3-2d3e-4f5a-2b6c-9d0e1f2a3b4c', 'portfolio_value', 500000, 285000, '2025-01-01', '2025-12-31', TRUE, '1e243a4b-5c6d-7e8f-9a0b-1c2d3e4f5a6b', NOW(), NOW()),
+('a1b2c3d4-3e4f-5a6b-1c7d-0e1f2a3b4c5d', 'push_ups', 5000, 1200, '2025-10-20', '2026-01-20', FALSE, '2f3a4b5c-6d75-8f9a-0b1c-2d3e4f5a6b7c', NOW(), NOW());
+
+#2 after fullbackup
+INSERT INTO diff_table_test
+(id, goal_type, target_value, current_value, start_date, end_date, is_active, user_id, created_at, updated_at)
+VALUES 
+('35dabd14-b837-43dc-b360-00217fdc1e85', 'coding_hours', 548, 81, '2026-03-13', '2026-07-13', false, '1d0f967a-c3f3-4509-b51c-3ae68a5eea5b', NOW(), NOW()),
+('dad651c6-ab40-4fff-a086-32345f0767ad', 'youtube_subscribers', 43588, 2931, '2026-04-23', '2026-10-01', false, '52b9edb6-ff5f-4e11-a0dd-07ae595b5b4e', NOW(), NOW()),
+('a213d7e9-1f4b-4000-b1da-7abeba0c072d', 'cycling', 275, 36, '2026-03-10', '2026-09-26', false, '91de1eb2-4823-45f2-bfe8-a9f85347b25e', NOW(), NOW()),
+('44a2927f-ed31-4e69-9ec0-e8816bd42daa', 'push_ups', 8547, 1762, '2026-04-05', '2027-02-21', false, '5357f353-2e77-48e0-879b-ff2d5746cd87', NOW(), NOW()),
+('40982528-8493-4640-9576-872075d5d8b6', 'coding_hours', 688, 50, '2026-02-19', '2026-09-19', false, '2e001e9a-046d-4296-94b0-b14ee60f1348', NOW(), NOW());
+
+
+CREATE TABLE diff_table_test (
+    id UUID PRIMARY KEY,
+    goal_type TEXT NOT NULL,
+    target_value INTEGER NOT NULL,
+    current_value INTEGER NOT NULL,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    is_active BOOLEAN NOT NULL,
+    user_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+lsof -i :55433
+
+pg_ctl -D /private/tmp/restore_BackUp stop
+
+kill 
+
+1. cd /Users/artempavlenko/Documents/softwareEngineering/RoadMapProjects/DatabaseBackupUtility
+2. source .venv/bin/activate
+

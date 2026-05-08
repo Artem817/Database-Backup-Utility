@@ -1,5 +1,8 @@
 import argparse
+import re
 import shlex
+from dataclasses import dataclass
+from html import escape
 from pathlib import Path
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import FileHistory
@@ -14,6 +17,17 @@ from clients.postgres_client import PostgresClient
 from clients.mysql_client import MysqlClient
 from console_utils import get_messenger, MessageLevel
 from enum import Enum
+from services.backup.catalog import BackupCatalog
+from utility.wal_segments import SEGMENTS_PER_LOG
+
+WAL_FILENAME_PATTERN = re.compile(r"^[0-9A-F]{24}$")
+
+
+@dataclass(frozen=True)
+class PromptState:
+    database_name: str
+    current_wal_file: str | None
+    new_wal_files: int | None
 
 class StorageType(Enum):
     LOCAL = "local"
@@ -32,6 +46,134 @@ def print_sql_preview(rows: list, limit: int = 10):
         elif i == limit:
             print(f"... {len(rows) - limit} more rows hidden")
             break
+
+
+def short_wal(wal_file: str | None) -> str:
+    """Return the short WAL suffix used in the prompt."""
+    if not wal_file:
+        return "?"
+
+    normalized = wal_file.strip().upper()
+    if not normalized:
+        return "?"
+    return normalized[-2:]
+
+
+def get_current_state(
+    db_client: Union[PostgresClient, MysqlClient],
+    dbname: str,
+) -> PromptState:
+    """
+    Fetch fresh prompt state.
+
+    This intentionally does not cache values between calls. Keep this path cheap:
+    one PostgreSQL metadata query plus one catalog lookup.
+    """
+    try:
+        current_wal_file = _fetch_current_wal_file(db_client)
+        last_backup_wal_file = _fetch_last_backup_wal_file(dbname)
+        new_wal_files = _count_wal_segments_between(
+            last_backup_wal_file,
+            current_wal_file,
+        )
+
+        return PromptState(
+            database_name=dbname,
+            current_wal_file=current_wal_file,
+            new_wal_files=new_wal_files,
+        )
+    except Exception:
+        _rollback_if_possible(db_client)
+        return PromptState(
+            database_name=dbname,
+            current_wal_file=None,
+            new_wal_files=None,
+        )
+
+
+def _fetch_current_wal_file(db_client: Union[PostgresClient, MysqlClient]) -> str | None:
+    if not isinstance(db_client, PostgresClient):
+        return None
+    if not db_client.is_connected or db_client.connection is None:
+        return None
+
+    with db_client.connection.cursor() as cursor:
+        cursor.execute("SELECT pg_walfile_name(pg_current_wal_lsn());")
+        row = cursor.fetchone()
+
+    if not row or not row[0]:
+        return None
+    return str(row[0]).strip().upper()
+
+
+def _fetch_last_backup_wal_file(dbname: str) -> str | None:
+    last_backup = BackupCatalog().get_last_successful_backup(database_name=dbname)
+    if not last_backup:
+        return None
+
+    for key in ("current_wal_file", "last_backup_wal_file", "previous_wal_file"):
+        wal_file = last_backup.get(key)
+        if isinstance(wal_file, str) and wal_file.strip():
+            return wal_file.strip().upper()
+
+    lsn_markers = last_backup.get("lsn_markers")
+    if isinstance(lsn_markers, dict):
+        for key in ("current_wal_file", "last_backup_wal_file", "previous_wal_file"):
+            wal_file = lsn_markers.get(key)
+            if isinstance(wal_file, str) and wal_file.strip():
+                return wal_file.strip().upper()
+
+    return None
+
+
+def _count_wal_segments_between(
+    last_backup_wal_file: str | None,
+    current_wal_file: str | None,
+) -> int | None:
+    last_position = _wal_position(last_backup_wal_file)
+    current_position = _wal_position(current_wal_file)
+
+    if last_position is None or current_position is None:
+        return None
+
+    last_timeline, last_segment_number = last_position
+    current_timeline, current_segment_number = current_position
+    if last_timeline != current_timeline or current_segment_number < last_segment_number:
+        return None
+
+    return current_segment_number - last_segment_number
+
+
+def _wal_position(wal_file: str | None) -> tuple[int, int] | None:
+    if not wal_file:
+        return None
+
+    normalized = wal_file.strip().upper()
+    if not WAL_FILENAME_PATTERN.match(normalized):
+        return None
+
+    timeline = int(normalized[0:8], 16)
+    log = int(normalized[8:16], 16)
+    segment = int(normalized[16:24], 16)
+    return timeline, (log * SEGMENTS_PER_LOG) + segment
+
+
+def _rollback_if_possible(db_client: Union[PostgresClient, MysqlClient]) -> None:
+    rollback = getattr(db_client, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            pass
+
+
+def _format_prompt(state: PromptState) -> HTML:
+    wal_suffix = escape(short_wal(state.current_wal_file))
+    wal_count = "?" if state.new_wal_files is None else str(state.new_wal_files)
+    database_name = escape(state.database_name)
+    return HTML(
+        f"<ansigreen>[{database_name} | WAL:{wal_suffix} | +{wal_count}]&gt;</ansigreen> "
+    )
 
 async def select_storage_type() -> StorageType:
     """Selecting a storage location without a dialogue box, directly in the console."""
@@ -219,7 +361,8 @@ async def interactive_console(
 
     while True:
         try:
-            query = await session.prompt_async(HTML(f'<ansigreen>[{dbname}]&gt;</ansigreen> '))
+            prompt_state = get_current_state(db_client, dbname)
+            query = await session.prompt_async(_format_prompt(prompt_state))
             query = query.strip()
             if not query:
                 continue
