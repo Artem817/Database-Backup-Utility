@@ -152,6 +152,47 @@ class BackupServiceRestoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only for PostgreSQL"):
             service.restore_postgres(parsed_args)
 
+    def test_restore_mysql_uses_xtrabackup_directory_and_restore_port(self) -> None:
+        service = BackupService(DummyDbClient(database_engine="mysql"))
+        parsed_args = SimpleNamespace(
+            backup_path=None,
+            path="/backups/full_mysql",
+            data_dir="/tmp/mysql-restore",
+            port=3308,
+            restore_port=None,
+            mysql_socket="/tmp/mysql_restore.sock",
+            mysql_bin_dir="/opt/mysql/bin",
+            mysql_owner=None,
+            mysql_group=None,
+            target_time=None,
+        )
+
+        with patch("services.backup_services.MysqlRestoreService") as restore_cls:
+            restore_cls.return_value.restore.return_value = True
+
+            service.restore_mysql(parsed_args)
+
+            restore_cls.assert_called_once_with(
+                backup_path="/backups/full_mysql",
+                data_dir="/tmp/mysql-restore",
+                restore_port=3308,
+                socket_path="/tmp/mysql_restore.sock",
+                mysql_bin_dir="/opt/mysql/bin",
+                owner_user=None,
+                owner_group=None,
+                logger=service.dbclient._logger,
+                messenger=service.dbclient._messenger,
+            )
+
+    def test_restore_database_dispatches_to_mysql_for_mysql_client(self) -> None:
+        service = BackupService(DummyDbClient(database_engine="mysql"))
+        parsed_args = SimpleNamespace()
+
+        with patch.object(service, "restore_mysql") as restore_mysql:
+            service.restore_database(parsed_args)
+
+            restore_mysql.assert_called_once_with(parsed_args)
+
 
 if __name__ == "__main__":
     unittest.main()

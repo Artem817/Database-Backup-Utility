@@ -12,6 +12,7 @@
 - Basic PostgreSQL WAL validation (sequence gaps, timeline consistency, file sanity checks)
 - MySQL full backup using `xtrabackup` (Percona XtraBackup)
 - MySQL differential backup command implemented via `xtrabackup --incremental` against the last full backup
+- Minimal MySQL restore from an XtraBackup directory (`prepare`, `copy-back`, `mysqld`, `mysqladmin ping`)
 - **Encrypted credential profiles (MySQL login-path, PostgreSQL .pgpass)**
 - SQLite-backed backup catalog tracking and versioned per-backup metadata/validation artifacts
 - Optional single `.tar.zst` archive creation for full backups when `zstd` is available
@@ -19,7 +20,7 @@
 
 **Not Yet Implemented:**
 - Cloud storage integration (CLI placeholders exist, upload implementation does not)
-- MySQL restore automation
+- MySQL restore from compressed `.qp` artifacts or single `.tar.zst` archives
 - Production-grade error handling
 - Stable user-facing PostgreSQL incremental backup workflow
 
@@ -45,6 +46,7 @@ The utility uses native database backup tools instead of SQL dumps:
 **MySQL:**
 - Full backup: `xtrabackup` physical backup with compression
 - Differential backup command: `xtrabackup --incremental --incremental-basedir=<last full backup>`
+- Minimal restore command: `xtrabackup --prepare`, `xtrabackup --copy-back`, start isolated `mysqld`
 - Requires Percona XtraBackup installed and access to the MySQL data directory
 
 ## Metadata and Catalog
@@ -415,6 +417,19 @@ What this command does:
 
 If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL archive path from `~/.backup_utility/config.json`.
 
+## MySQL Restore
+
+Minimal MySQL restore is available for an already-expanded XtraBackup directory:
+
+```bash
+python cli/dbtool.py restore --db mysql \
+  --backup-path /path/to/mysql_backup \
+  --data-dir /tmp/mysql_restore \
+  --port 3308
+```
+
+The backup directory must contain `xtrabackup_info`, `xtrabackup_checkpoints`, `ibdata1`, and `mysql/`. If those artifacts are stored as `.zst` files, the restore flow recursively decompresses them with `zstd -d --keep` before validation and prepare. It then runs `xtrabackup --prepare`, `xtrabackup --copy-back`, adjusts ownership when possible, starts an isolated `mysqld` on `127.0.0.1:<port>`, and verifies it with `mysqladmin ping`.
+
 ## Limitations
 
 **Current Limitations:**
@@ -433,7 +448,9 @@ If `--archive-dir` is omitted, the utility tries to use the saved PostgreSQL WAL
 **MySQL:**
 - Full backups and differential backups are implemented
 - Differential backup is based on `xtrabackup --incremental` against the last full backup
-- Requires xtrabackup prepare step before restore (manual)
+- Minimal restore expects an XtraBackup directory containing `xtrabackup_info`, `xtrabackup_checkpoints`, `ibdata1`, and `mysql/`
+- Restore recursively decompresses `.zst` artifacts before `xtrabackup --prepare`
+- Restore from compressed `.qp` artifacts or single `.tar.zst` archives is not implemented
 
 ## Development Status
 

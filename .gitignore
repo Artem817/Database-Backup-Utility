@@ -230,3 +230,4 @@ backup_catalog.db-journal
 project-requirements.md
 april_20.md
 FUNCTION_CHANGES.md
+2.3 Алгоритм створення повної резервної копії PostgreSQL.md

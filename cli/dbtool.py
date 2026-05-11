@@ -14,6 +14,7 @@ from cli.postgres_wal_config import PostgresWalArchiveConfig
 from cli.validateconfig import validate_config
 from console_utils import get_messenger, configure_messenger
 from custom_logging import BackupLogger
+from services.restore.mysql_restore import MysqlRestoreService
 from services.restore.postgres_restore import PostgresRestoreService
 from services.restore.pitr import (
     PITR_TIMEZONE_POLICY,
@@ -51,6 +52,11 @@ Examples:
   python cli/dbtool.py restore --db postgres --database postgres \\
     --target-time "2026-05-04 12:30:00" \\
     --data-dir /tmp/postgres-pitr --archive-dir /tmp/pg_archive
+
+  # MySQL restore from an XtraBackup directory
+  python cli/dbtool.py restore --db mysql \\
+    --backup-path /backups/full_mysql_20260427 \\
+    --data-dir /tmp/mysql_restore --port 3308
     """
 )
 
@@ -69,7 +75,7 @@ parser.add_argument(
 
 parser.add_argument(
     "--database", 
-    required=True, 
+    required=False, 
     help="Name of the database"
 )
 
@@ -86,11 +92,11 @@ parser.add_argument(
 )
 
 parser.add_argument("--host", help="Database host address")
-parser.add_argument("--port", help="Database port (default: 5432 for postgres)")
+parser.add_argument("--port", help="Database port; for MySQL restore this is the restored instance port")
 parser.add_argument("--user", help="Database username")
 parser.add_argument("--password", help="Database password")
-parser.add_argument("--backup-path", help="PostgreSQL full backup directory or .tar.zst archive to restore")
-parser.add_argument("--data-dir", help="New PostgreSQL data directory for restore")
+parser.add_argument("--backup-path", help="Backup directory or supported archive to restore")
+parser.add_argument("--data-dir", help="New database data directory for restore")
 parser.add_argument("--archive-dir", help="Path to archived WAL files for PostgreSQL restore")
 parser.add_argument(
     "--target-time",
@@ -123,6 +129,23 @@ parser.add_argument(
 parser.add_argument(
     "--pg-bin-dir",
     help="Directory containing pg_ctl and psql when PostgreSQL binaries are not in PATH"
+)
+parser.add_argument(
+    "--mysql-bin-dir",
+    help="Directory containing xtrabackup, mysqld, and mysqladmin when MySQL binaries are not in PATH"
+)
+parser.add_argument(
+    "--mysql-socket",
+    default="/tmp/mysql_restore.sock",
+    help="Socket path for the restored MySQL instance (default: /tmp/mysql_restore.sock)"
+)
+parser.add_argument(
+    "--mysql-owner",
+    help="Owner user for restored MySQL data directory; auto-detected when omitted"
+)
+parser.add_argument(
+    "--mysql-group",
+    help="Owner group for restored MySQL data directory; auto-detected when omitted"
 )
 parser.add_argument(
     "--validate-restore",
@@ -163,19 +186,47 @@ messenger = get_messenger()
 
 try:
     if args.command == "restore":
-        if args.db != "postgres":
-            parser.error("Restore is currently implemented only for --db postgres")
-        if not args.backup_path and not args.target_time:
-            parser.error("--backup-path is required for restore unless --target-time is used for PITR")
         if not args.data_dir:
             parser.error("--data-dir is required for restore")
 
+        restore_name = args.database or args.db
         restore_logger = BackupLogger(
-            name=f"restore_{args.database}",
-            log_file=f"restore_{args.database}.log"
+            name=f"restore_{restore_name}",
+            log_file=f"restore_{restore_name}.log"
         )
         configure_messenger(logger=restore_logger.logger, enable_colors=True)
         messenger = get_messenger()
+
+        if args.db == "mysql":
+            if not args.backup_path:
+                parser.error("--backup-path is required for MySQL restore")
+            if args.target_time:
+                parser.error("--target-time restore is currently implemented only for PostgreSQL")
+
+            try:
+                mysql_restore_port = int(args.port) if args.port else 3308
+            except ValueError:
+                parser.error("--port must be an integer for MySQL restore")
+
+            restore_service = MysqlRestoreService(
+                backup_path=args.backup_path,
+                data_dir=args.data_dir,
+                restore_port=mysql_restore_port,
+                socket_path=args.mysql_socket,
+                mysql_bin_dir=args.mysql_bin_dir,
+                owner_user=args.mysql_owner,
+                owner_group=args.mysql_group,
+                logger=restore_logger,
+                messenger=messenger,
+            )
+
+            if not restore_service.restore():
+                sys.exit(EXIT_FAILURE)
+
+            sys.exit(0)
+
+        if not args.backup_path and not args.target_time:
+            parser.error("--backup-path is required for restore unless --target-time is used for PITR")
 
         archive_dir = args.archive_dir
         if not archive_dir:
@@ -200,7 +251,7 @@ try:
                 messenger.info(f"Recovery target time: {recovery_target_time}")
             else:
                 pitr_plan = PostgresPitrPlanner(
-                    database_name=args.database,
+                    database_name=args.database or "postgres",
                     target_time=args.target_time,
                     catalog_path=args.catalog_path,
                     messenger=messenger,
@@ -213,7 +264,7 @@ try:
             data_dir=args.data_dir,
             archive_dir=archive_dir,
             restore_port=args.restore_port,
-            verify_database=args.database,
+            verify_database=args.database or "postgres",
             verify_user=args.verify_user,
             verify_query=args.verify_query,
             pg_bin_dir=args.pg_bin_dir,
@@ -227,6 +278,8 @@ try:
 
         sys.exit(0)
 
+    if not args.database:
+        parser.error("--database is required for backup")
     if not args.storage:
         parser.error("--storage is required for backup")
     if not args.config:

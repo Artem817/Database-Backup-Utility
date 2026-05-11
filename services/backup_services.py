@@ -1,5 +1,6 @@
 from custom_logging import BackupCatalog
 from services.backup.metadata import BackupMetadataReader
+from services.restore.mysql_restore import MysqlRestoreService
 from services.restore.postgres_restore import PostgresRestoreService
 from services.restore.pitr import (
     PITR_TIMEZONE_POLICY,
@@ -62,6 +63,15 @@ class BackupService:
         
         self.dbclient.perform_differential_backup(metadata_reader)
 
+    def restore_database(self, parsed_args) -> None:
+        """Handle restore for the connected database engine."""
+        engine = getattr(self.dbclient, "database_engine", None)
+        if engine == "postgresql":
+            return self.restore_postgres(parsed_args)
+        if engine == "mysql":
+            return self.restore_mysql(parsed_args)
+        raise ValueError(f"Restore is not supported for database engine: {engine}")
+
     def restore_postgres(self, parsed_args) -> None:
         """Handle minimal PostgreSQL restore from the interactive console"""
         if getattr(self.dbclient, "database_engine", None) != "postgresql":
@@ -117,7 +127,7 @@ class BackupService:
             backup_path=str(backup_path),
             data_dir=str(parsed_args.data_dir),
             archive_dir=str(wal_archive_path),
-            restore_port=parsed_args.restore_port,
+            restore_port=parsed_args.restore_port or 55432,
             verify_database=self.dbclient.database_name,
             verify_user=parsed_args.verify_user or self.dbclient.connection_params.get("user") or "postgres",
             verify_query=parsed_args.verify_query,
@@ -129,6 +139,54 @@ class BackupService:
 
         if not restore_service.restore():
             raise RuntimeError("PostgreSQL restore failed")
+
+    def restore_mysql(self, parsed_args) -> None:
+        """Handle minimal MySQL restore from an XtraBackup directory."""
+        if getattr(self.dbclient, "database_engine", None) != "mysql":
+            raise ValueError("MySQL restore command requires a MySQL client session")
+
+        if getattr(parsed_args, "target_time", None):
+            raise ValueError("PITR target time restore is currently implemented only for PostgreSQL")
+
+        backup_path = parsed_args.backup_path or parsed_args.path
+        if not backup_path:
+            raise ValueError(
+                "Backup path is required. Use: restore -path <xtrabackup_dir> "
+                "-data-dir <new_data_dir> -port <restore_port>"
+            )
+
+        if not parsed_args.data_dir:
+            raise ValueError(
+                "Data directory is required. Use: restore -path <xtrabackup_dir> "
+                "-data-dir <new_data_dir> -port <restore_port>"
+            )
+
+        restore_port = (
+            getattr(parsed_args, "port", None)
+            or getattr(parsed_args, "restore_port", None)
+            or 3308
+        )
+
+        restore_service = MysqlRestoreService(
+            backup_path=str(backup_path),
+            data_dir=str(parsed_args.data_dir),
+            restore_port=int(restore_port),
+            socket_path=str(
+                getattr(parsed_args, "mysql_socket", None) or "/tmp/mysql_restore.sock"
+            ),
+            mysql_bin_dir=(
+                str(parsed_args.mysql_bin_dir)
+                if getattr(parsed_args, "mysql_bin_dir", None)
+                else None
+            ),
+            owner_user=getattr(parsed_args, "mysql_owner", None),
+            owner_group=getattr(parsed_args, "mysql_group", None),
+            logger=self.dbclient._logger,
+            messenger=self.dbclient._messenger,
+        )
+
+        if not restore_service.restore():
+            raise RuntimeError("MySQL restore failed")
     
     def execute_sql(self, sql_query, parsed_args) -> None:
         """Handle SQL execution"""

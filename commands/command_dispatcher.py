@@ -14,8 +14,8 @@ class CommandDispatcher:
         command_mapping = {
             "full database": "full_backup",
             "differential backup": "differential_backup",
-            "restore": "restore_postgres",
-            "restore database": "restore_postgres",
+            "restore": "restore_database",
+            "restore database": "restore_database",
             "help": "help"
         }
         

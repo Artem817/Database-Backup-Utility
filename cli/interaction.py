@@ -237,10 +237,15 @@ def parse_query_args(query: str):
     parser.add_argument("-archive-dir", type=Path, default=None, help="Alias for -wal-path")
     parser.add_argument("-target-time", default=None, help="PostgreSQL PITR target time; values without timezone are UTC")
     parser.add_argument("-catalog-path", default="backup_catalog.db", help="Backup catalog path for PITR base backup selection")
-    parser.add_argument("-restore-port", type=int, default=55432, help="Port for restored PostgreSQL")
+    parser.add_argument("-restore-port", type=int, default=None, help="Port for restored PostgreSQL")
+    parser.add_argument("-port", type=int, default=None, help="Port for restored MySQL")
     parser.add_argument("-verify-user", default=None, help="User for restore verification query")
     parser.add_argument("-verify-query", default="SELECT 1;", help="SQL query for restore verification")
     parser.add_argument("-pg-bin-dir", type=Path, default=None, help="Directory with pg_ctl and psql binaries")
+    parser.add_argument("-mysql-bin-dir", type=Path, default=None, help="Directory with xtrabackup, mysqld, and mysqladmin binaries")
+    parser.add_argument("-mysql-socket", default="/tmp/mysql_restore.sock", help="Socket path for restored MySQL")
+    parser.add_argument("-mysql-owner", default=None, help="Owner user for restored MySQL data directory")
+    parser.add_argument("-mysql-group", default=None, help="Owner group for restored MySQL data directory")
     parser.add_argument("-validate-restore", type=str_to_bool_caster, default=True, help="Run automated test-restore after PostgreSQL full backup")
     parser.add_argument("-restore-validation-port", type=int, default=0, help="Port for automated restore validation; 0 selects a free port")
     parser.add_argument("-restore-validation-keep-data", type=str_to_bool_caster, default=False, help="Keep temporary restore data after validation")
@@ -283,9 +288,14 @@ class SQLCompleter(Completer):
         '-target-time',
         '-catalog-path',
         '-restore-port',
+        '-port',
         '-verify-user',
         '-verify-query',
         '-pg-bin-dir',
+        '-mysql-bin-dir',
+        '-mysql-socket',
+        '-mysql-owner',
+        '-mysql-group',
         '-validate-restore',
         '-restore-validation-port',
         '-restore-validation-keep-data',
