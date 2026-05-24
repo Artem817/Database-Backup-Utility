@@ -277,6 +277,7 @@ class SQLCompleter(Completer):
         'quit',
         'full database',
         'differential backup',
+        'validate backup',
         'restore',
         'restore database',
         'SQL',

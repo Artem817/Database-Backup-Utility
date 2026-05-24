@@ -65,6 +65,32 @@ class BackupContractManager:
         self._logger = logger
         self._messenger = messenger
 
+    def validate_backup_document(
+        self,
+        metadata_doc: Dict[str, Any],
+        output_dir: Path | str,
+    ) -> Dict[str, Any]:
+        """
+        Re-run artifact validation for an existing backup metadata document.
+
+        This is intentionally narrower than persist_backup_documents(): it does
+        not rewrite metadata.json or change backup completion state. It only
+        refreshes current artifact status and rewrites validation.json.
+        """
+        output_dir = Path(output_dir)
+        validation_doc = self._build_validation_document(
+            self._refresh_metadata_for_validation(metadata_doc, output_dir),
+            output_dir,
+        )
+
+        for key in ("metadata_path", "validation_path"):
+            if key in validation_doc["artifacts"]:
+                validation_doc["artifacts"][key]["exists"] = True
+                validation_doc["artifacts"][key]["is_file"] = True
+
+        self._write_json(output_dir / "validation.json", validation_doc)
+        return validation_doc
+
     def persist_backup_documents(
         self,
         metadata: Dict[str, Any],
@@ -165,6 +191,43 @@ class BackupContractManager:
         normalized.setdefault("restore_validation", {})
 
         return normalized
+
+    def _refresh_metadata_for_validation(
+        self,
+        metadata_doc: Dict[str, Any],
+        output_dir: Path,
+    ) -> Dict[str, Any]:
+        refreshed = deepcopy(metadata_doc)
+        artifact_paths = refreshed.get("artifact_paths")
+        if isinstance(artifact_paths, dict):
+            artifact_paths["backup_location"] = str(output_dir)
+            artifact_paths["metadata_path"] = str(output_dir / "metadata.json")
+            artifact_paths["validation_path"] = str(output_dir / "validation.json")
+
+        refreshed["manifest"] = self._build_artifact_status(
+            artifact_paths.get("manifest_path", "") if isinstance(artifact_paths, dict) else ""
+        )
+        refreshed["checkpoints"] = self._build_artifact_status(
+            artifact_paths.get("checkpoints_path", "") if isinstance(artifact_paths, dict) else ""
+        )
+
+        if isinstance(artifact_paths, dict):
+            old_checksums = refreshed.get("checksums", {})
+            wal_checksums = {
+                key: value
+                for key, value in old_checksums.items()
+                if isinstance(key, str) and key.startswith("wal::")
+            } if isinstance(old_checksums, dict) else {}
+            refreshed["checksums"] = self._build_checksums(
+                artifact_paths,
+                output_dir,
+                refreshed.get("engine"),
+                refreshed.get("backup_type"),
+            )
+            for key, value in wal_checksums.items():
+                refreshed["checksums"].setdefault(key, value)
+
+        return refreshed
 
     def _build_validation_document(
         self,
@@ -322,6 +385,9 @@ class BackupContractManager:
             or self._infer_file(output_dir, "xtrabackup_checkpoints")
         )
         binlog_info_path = metadata.get("binlog_info_path") or self._infer_file(output_dir, "xtrabackup_binlog_info")
+        xtrabackup_info_path = metadata.get("xtrabackup_info_path") or self._infer_file(output_dir, "xtrabackup_info")
+        ibdata1_path = metadata.get("ibdata1_path") or self._infer_file(output_dir, "ibdata1")
+        mysql_directory_path = metadata.get("mysql_directory_path") or self._infer_directory(output_dir, "mysql")
         archive_path = metadata.get("archive_path") or ""
         base_tar_path = metadata.get("base_tar_path") or self._infer_file(output_dir, "base.tar.gz")
         wal_tar_path = metadata.get("wal_tar_path") or self._infer_file(output_dir, "pg_wal.tar.gz")
@@ -338,6 +404,9 @@ class BackupContractManager:
             "manifest_path": manifest_path,
             "checkpoints_path": checkpoints_path,
             "binlog_info_path": binlog_info_path,
+            "xtrabackup_info_path": xtrabackup_info_path,
+            "ibdata1_path": ibdata1_path,
+            "mysql_directory_path": mysql_directory_path,
             "base_tar_path": base_tar_path,
             "wal_tar_path": wal_tar_path,
             "base_backup_reference_path": base_backup_reference_path,
@@ -347,6 +416,11 @@ class BackupContractManager:
     def _infer_file(output_dir: Path, filename: str) -> str:
         path = output_dir / filename
         return str(path) if path.exists() else ""
+
+    @staticmethod
+    def _infer_directory(output_dir: Path, dirname: str) -> str:
+        path = output_dir / dirname
+        return str(path) if path.is_dir() else ""
 
     @staticmethod
     def _build_lsn_markers(metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -457,7 +531,43 @@ class BackupContractManager:
                 "required": key in required_keys,
                 "exists": exists,
                 "is_file": bool(file_path and file_path.is_file()) if file_path else False,
+                "is_dir": bool(file_path and file_path.is_dir()) if file_path else False,
                 "checksum_sha256": checksums.get(key, {}).get("checksum_sha256"),
+            }
+
+        for key, checksum in checksums.items():
+            if not isinstance(key, str) or not key.startswith("wal::"):
+                continue
+            wal_name = key.split("::", 1)[1]
+            path = checksum.get("path") or str(output_dir / wal_name)
+            file_path = Path(path)
+            report[key] = {
+                "path": path,
+                "required": True,
+                "exists": file_path.exists(),
+                "is_file": file_path.is_file(),
+                "is_dir": file_path.is_dir(),
+                "checksum_sha256": checksum.get("checksum_sha256"),
+            }
+
+        for wal_item in metadata_doc.get("wal_files", []) or []:
+            if not isinstance(wal_item, dict):
+                continue
+            wal_name = wal_item.get("filename")
+            if not wal_name:
+                continue
+            key = f"wal::{wal_name}"
+            if key in report:
+                continue
+            path = wal_item.get("backup_path") or str(output_dir / wal_name)
+            file_path = Path(path)
+            report[key] = {
+                "path": path,
+                "required": True,
+                "exists": file_path.exists(),
+                "is_file": file_path.is_file(),
+                "is_dir": file_path.is_dir(),
+                "checksum_sha256": wal_item.get("checksum_sha256"),
             }
 
         for wal_file in self._iter_postgres_wal_files(output_dir):
@@ -466,6 +576,7 @@ class BackupContractManager:
                 "required": True,
                 "exists": True,
                 "is_file": True,
+                "is_dir": False,
                 "checksum_sha256": checksums.get(f"wal::{wal_file.name}", {}).get("checksum_sha256"),
             }
 
@@ -479,8 +590,21 @@ class BackupContractManager:
 
         if engine == "postgresql" and backup_type == "full":
             required.update({"base_tar_path", "wal_tar_path"})
+        if engine == "postgresql" and backup_type in {"differential", "incremental"}:
+            required.add("base_backup_reference_path")
         if engine == "mysql" and backup_type in {"full", "differential"}:
             required.add("checkpoints_path")
+
+        explicit_required = (
+            metadata_doc.get("required_artifacts")
+            or metadata_doc.get("required_artifact_keys")
+        )
+        if isinstance(explicit_required, dict):
+            required.update(
+                key for key, is_required in explicit_required.items() if is_required
+            )
+        elif isinstance(explicit_required, (list, tuple, set)):
+            required.update(str(key) for key in explicit_required)
 
         return required
 

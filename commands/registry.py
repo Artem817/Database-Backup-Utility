@@ -1,10 +1,15 @@
 from .command_dispatcher import CommandDispatcher
 from services.backup_services import BackupService
+from services.backup.validation import BackupArtifactValidationService
 from console_utils import MessageLevel
 
 def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
     dispatcher = CommandDispatcher(storage_type = storage_type)
     backup_service = BackupService(db_client)
+    validation_service = BackupArtifactValidationService(
+        logger=getattr(db_client, "_logger", None),
+        messenger=messenger,
+    )
     
     def help_command(parsed_args):
         messenger.section_header("Database Backup Utility")
@@ -50,7 +55,17 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
         print("     - Statements that do not return rows are executed without preview output.")
         print()
 
-        messenger.print_colored("4) SQL export to CSV", MessageLevel.INFO)
+        messenger.print_colored("4) Validate backup artifact contract", MessageLevel.INFO)
+        print("   Command:")
+        print("     validate backup -path <backup_directory>")
+        print("   Example:")
+        print("     validate backup -path /backups/full_pg_20260427")
+        print("   Details:")
+        print("     - Loads metadata.json from the backup directory.")
+        print("     - Re-runs required artifact checks and rewrites validation.json.")
+        print()
+
+        messenger.print_colored("5) SQL export to CSV", MessageLevel.INFO)
         print("   Command:")
         print("     SQL <your_sql_query> -extract -path <destination_path>")
         print("   Example:")
@@ -59,7 +74,7 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
         print("     - Runs the query and writes the result to CSV files under the destination path.")
         print()
 
-        messenger.print_colored("5) Restore", MessageLevel.INFO)
+        messenger.print_colored("6) Restore", MessageLevel.INFO)
         print("   Commands:")
         print("     restore -path <full_backup_dir_or_archive> -data-dir <new_data_dir> -wal-path <wal_archive_dir>")
         print("     restore -backup-path <full_backup_dir_or_archive> -data-dir <new_data_dir> -archive-dir <wal_archive_dir>")
@@ -89,7 +104,7 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
         print("       starts mysqld on the restore port, and verifies it with mysqladmin ping.")
         print()
 
-        messenger.print_colored("6) Common flags", MessageLevel.INFO)
+        messenger.print_colored("7) Common flags", MessageLevel.INFO)
         print("   -path <path>                 Backup destination or SQL export destination")
         print("   -backup-path <path>          Alias-style restore input path for PostgreSQL restore")
         print("   -data-dir <path>             New database data directory for restore")
@@ -106,13 +121,17 @@ def build_dispatcher(db_client, messenger,  storage_type: str = "local"):
         print("   -extract                     Export SQL result to CSV instead of previewing it")
         print()
 
-        messenger.print_colored("7) Session commands", MessageLevel.INFO)
+        messenger.print_colored("8) Session commands", MessageLevel.INFO)
         print("   help                         Show this help")
         print("   exit | quit                  Leave the interactive console")
         print()
+
+    def validate_backup_command(parsed_args):
+        return validation_service.validate_backup(parsed_args.path)
     
     dispatcher.register_command("full_backup", backup_service.full_backup)
     dispatcher.register_command("differential_backup", backup_service.differential_backup)
+    dispatcher.register_command("validate_backup", validate_backup_command)
     dispatcher.register_command("restore_database", backup_service.restore_database)
     dispatcher.register_command("restore_postgres", backup_service.restore_postgres)
     dispatcher.register_command("restore_mysql", backup_service.restore_mysql)
